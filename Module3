@@ -1,0 +1,221 @@
+import sys
+import re
+import csv
+import serial
+import numpy as np
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                               QHBoxLayout, QLabel, QSlider, QSpinBox,
+                               QRadioButton, QButtonGroup, QGroupBox)
+from PySide6.QtCore import Qt, QTimer
+import pyqtgraph as pg
+
+# =============================================================================
+# USER CONFIGURATION PARAMETERS
+# =============================================================================
+SERIAL_PORT = 'COM3'         # Serial port name
+BAUD_RATE = 9600             # Baud rate
+WINDOW_DURATION = 60.0       # Plot rolling window (seconds)
+UPDATE_INTERVAL_MS = 50      # Loop check interval (ms)
+TEMP_MIN = 15.0              # Min plot temp (°C)
+TEMP_MAX = 45.0              # Max plot temp (°C)
+CSV_FILENAME = 'temperature_control_log.csv'
+
+LINE_PATTERN = re.compile(
+    r"^Temperature \(C\):\s*([0-9\.-]+),\s*Time \(s\):\s*([0-9\.-]+),\s*PWM:\s*([0-9]+),\s*Heat/Cool:\s*([01])$"
+)
+
+class TECControlGUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("TEC Manual Control Interface")
+        self.resize(950, 750)
+
+        # Plot Data Arrays
+        self.time_data = []
+        self.temp_data = []
+        self.pwm_heat_data = []
+        self.pwm_cool_data = []
+
+        # CSV Logging Setup
+        self.csv_file = open(CSV_FILENAME, 'a', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        if self.csv_file.tell() == 0:
+            self.csv_writer.writerow(['time_s', 'temperature_C', 'pwm', 'heat_cool'])
+            self.csv_file.flush()
+
+        # Serial Setup
+        try:
+            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+        except Exception as e:
+            print(f"Serial Connection Error on {SERIAL_PORT}: {e}")
+            self.ser = None
+
+        # Build GUI Layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # --- Section 1: Control Panel ---
+        ctrl_layout = QHBoxLayout()
+
+        # Direction Switch (Radio Buttons)
+        dir_box = QGroupBox("Direction")
+        dir_inner = QHBoxLayout()
+        self.radio_heat = QRadioButton("HEAT")
+        self.radio_cool = QRadioButton("COOL")
+        self.radio_heat.setChecked(True)
+        self.dir_group = QButtonGroup()
+        self.dir_group.addButton(self.radio_heat)
+        self.dir_group.addButton(self.radio_cool)
+        dir_inner.addWidget(self.radio_heat)
+        dir_inner.addWidget(self.radio_cool)
+        dir_box.setLayout(dir_inner)
+
+        # Synchronized PWM Slider and Clamped Text Box (0-255)
+        pwm_box = QGroupBox("PWM Output (0-255)")
+        pwm_inner = QHBoxLayout()
+        self.pwm_slider = QSlider(Qt.Horizontal)
+        self.pwm_slider.setRange(0, 255)
+        self.pwm_spin = QSpinBox()
+        self.pwm_spin.setRange(0, 255)
+
+        # Connect Slider and SpinBox to keep them synchronized
+        self.pwm_slider.valueChanged.connect(self.pwm_spin.setValue)
+        self.pwm_spin.valueChanged.connect(self.pwm_slider.setValue)
+
+        # Command sending signals
+        self.pwm_slider.valueChanged.connect(self.send_command)
+        self.radio_heat.toggled.connect(self.send_command)
+
+        pwm_inner.addWidget(self.pwm_slider)
+        pwm_inner.addWidget(self.pwm_spin)
+        pwm_box.setLayout(pwm_inner)
+
+        # Live Display Labels
+        disp_box = QGroupBox("Live Status")
+        disp_inner = QVBoxLayout()
+        self.lbl_time = QLabel("Time: 0.00 s")
+        self.lbl_temp = QLabel("Temp: -- °C")
+        self.lbl_pwm = QLabel("PWM: 0")
+        self.lbl_dir = QLabel("Dir: HEAT")
+        disp_inner.addWidget(self.lbl_time)
+        disp_inner.addWidget(self.lbl_temp)
+        disp_inner.addWidget(self.lbl_pwm)
+        disp_inner.addWidget(self.lbl_dir)
+        disp_box.setLayout(disp_inner)
+
+        ctrl_layout.addWidget(dir_box)
+        ctrl_layout.addWidget(pwm_box)
+        ctrl_layout.addWidget(disp_box)
+        main_layout.addLayout(ctrl_layout)
+
+        # --- Section 2: Charts ---
+        # Temperature Strip Chart
+        self.temp_plot = pg.PlotWidget(title="Temperature vs. Arduino Time")
+        self.temp_plot.setLabel('left', "Temperature", units="°C")
+        self.temp_plot.setLabel('bottom', "Time", units="s")
+        self.temp_plot.setYRange(TEMP_MIN, TEMP_MAX)
+        self.temp_plot.showGrid(x=True, y=True)
+        self.temp_curve = self.temp_plot.plot(pen=pg.mkPen('y', width=2))
+        main_layout.addWidget(self.temp_plot)
+
+        # PWM Strip Chart (Red = Heating, Blue = Cooling)
+        self.pwm_plot = pg.PlotWidget(title="PWM Output vs. Arduino Time")
+        self.pwm_plot.setLabel('left', "PWM Magnitude", units="0-255")
+        self.pwm_plot.setLabel('bottom', "Time", units="s")
+        self.pwm_plot.setYRange(0, 260)
+        self.pwm_plot.showGrid(x=True, y=True)
+
+        # connect='finite' ensures NaN gaps do not connect solid lines
+        self.pwm_heat_curve = self.pwm_plot.plot(pen=pg.mkPen('r', width=2.5), connect='finite')
+        self.pwm_cool_curve = self.pwm_plot.plot(pen=pg.mkPen('b', width=2.5), connect='finite')
+        main_layout.addWidget(self.pwm_plot)
+
+        # Serial check timer
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.read_serial_data)
+        self.timer.start(UPDATE_INTERVAL_MS)
+
+    def send_command(self):
+        """Formats and sends serial commands whenever GUI controls change."""
+        pwm_val = self.pwm_slider.value()
+        direction = "HEAT" if self.radio_heat.isChecked() else "COOL"
+
+        self.lbl_pwm.setText(f"PWM: {pwm_val}")
+        self.lbl_dir.setText(f"Dir: {direction}")
+
+        command_str = f"SET PWM {pwm_val} DIR {direction}\n"
+        if self.ser and self.ser.is_open:
+            self.ser.write(command_str.encode('utf-8'))
+
+    def read_serial_data(self):
+        """Parses incoming measurement lines, logs CSV, and updates displays/plots."""
+        if not self.ser or not self.ser.is_open:
+            return
+
+        while self.ser.in_waiting > 0:
+            try:
+                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            except Exception:
+                continue
+
+            match = LINE_PATTERN.match(line)
+            if not match:
+                continue
+
+            temp_c = float(match.group(1))
+            time_s = float(match.group(2))
+            pwm = int(match.group(3))
+            heat_cool = int(match.group(4))
+
+            # Print exact formatted line to terminal
+            print(f"Temperature (C): {temp_c:.2f}, Time (s): {time_s:.2f}, PWM: {pwm}, Heat/Cool: {heat_cool}")
+
+            # Update CSV
+            self.csv_writer.writerow([time_s, temp_c, pwm, heat_cool])
+            self.csv_file.flush()
+
+            # Update Live Status Labels
+            self.lbl_time.setText(f"Time: {time_s:.2f} s")
+            self.lbl_temp.setText(f"Temp: {temp_c:.2f} °C")
+
+            # Store Plot Data
+            self.time_data.append(time_s)
+            self.temp_data.append(temp_c)
+
+            # Separate heating and cooling series using NaN for correct line colors
+            if heat_cool == 1:
+                self.pwm_heat_data.append(pwm)
+                self.pwm_cool_data.append(np.nan)
+            else:
+                self.pwm_heat_data.append(np.nan)
+                self.pwm_cool_data.append(pwm)
+
+            # Apply rolling window
+            cutoff = time_s - WINDOW_DURATION
+            while self.time_data and self.time_data[0] < cutoff:
+                self.time_data.pop(0)
+                self.temp_data.pop(0)
+                self.pwm_heat_data.pop(0)
+                self.pwm_cool_data.pop(0)
+
+            # Redraw Plots
+            self.temp_curve.setData(self.time_data, self.temp_data)
+            self.pwm_heat_curve.setData(self.time_data, self.pwm_heat_data)
+            self.pwm_cool_curve.setData(self.time_data, self.pwm_cool_data)
+
+            self.temp_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
+            self.pwm_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
+
+    def closeEvent(self, event):
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        if self.csv_file and not self.csv_file.closed:
+            self.csv_file.close()
+        event.accept()
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = TECControlGUI()
+    window.show()
+    sys.exit(app.exec())
