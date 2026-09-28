@@ -16,10 +16,12 @@ const float T0_KELVIN = 298.15;      // Reference temperature in Kelvin
 const float BETA = 3950.0;           // Beta coefficient
 const int SAMPLE_COUNT = 500;        // ADC samples to average per reading (100-1000)
 const int REPORT_INTERVAL = 1000;    // Serial report interval in milliseconds
+const float SOFTWARE_TEMP_LIMIT_C = 60.0; // Software shutdown limit for TEC output. Hardware thermal switch at ~70 C remains the independent final protection.
 
 // --- Control State Variables ---
 int currentPwm = 0;                  // PWM starts at 0 for safe initialization
 bool isHeating = true;               // State flag: true = HEAT, false = COOL
+bool safetyShutdownActive = false;   // Software thermal cutoff flag
 unsigned long lastReportTime = 0;
 
 void setup() {
@@ -38,20 +40,25 @@ void loop() {
   // 1. Check for and parse incoming serial commands from Python
   parseSerialCommands();
 
-  // 2. Drive the H-bridge pins based on current PWM and physical direction mapping
-  applyHBridgeOutput();
+  // 2. Read the averaged temperature every loop so the software safety check can react immediately.
+  float tempC = readTemperature();
 
-  // 3. Measure temperature and print the required measurement line every 1 second
+  // 3. If the software limit is exceeded, disable H-bridge PWM immediately and keep the thermal output off.
+  if (tempC > SOFTWARE_TEMP_LIMIT_C) {
+    safetyShutdownActive = true;
+    currentPwm = 0;
+    setHBridgeDisabled();
+  } else {
+    safetyShutdownActive = false;
+    applyHBridgeOutput();
+  }
+
+  // 4. Continue reporting telemetry to the Python GUI even while shutdown is active.
   if (millis() - lastReportTime >= REPORT_INTERVAL) {
     lastReportTime = millis();
-
-    float tempC = readTemperature();
     float timeSec = millis() / 1000.0;
-
-    // Heat/Cool field: 1 for observed heating, 0 for observed cooling
     int heatCoolFlag = isHeating ? 1 : 0;
 
-    // Standardized Serial Output Interface
     Serial.print("Temperature (C): ");
     Serial.print(tempC, 2);
     Serial.print(", Time (s): ");
@@ -59,7 +66,16 @@ void loop() {
     Serial.print(", PWM: ");
     Serial.print(currentPwm);
     Serial.print(", Heat/Cool: ");
-    Serial.println(heatCoolFlag);
+    Serial.print(heatCoolFlag);
+
+    if (safetyShutdownActive) {
+      Serial.print(", Safety: SHUTDOWN ACTIVE (temp > ");
+      Serial.print(SOFTWARE_TEMP_LIMIT_C, 1);
+      Serial.print(" C, both H-bridge PWM outputs set to 0)");
+    } else {
+      Serial.print(", Safety: OK");
+    }
+    Serial.println();
   }
 }
 
@@ -116,6 +132,13 @@ void applyHBridgeOutput() {
     digitalWrite(PIN_9, LOW);
     analogWrite(PIN_10, currentPwm);
   }
+}
+
+void setHBridgeDisabled() {
+  analogWrite(PIN_9, 0);
+  analogWrite(PIN_10, 0);
+  digitalWrite(PIN_9, LOW);
+  digitalWrite(PIN_10, LOW);
 }
 
 // ============================================================================

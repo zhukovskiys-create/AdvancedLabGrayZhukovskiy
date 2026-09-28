@@ -46,6 +46,9 @@ class TECControlGUI(QMainWindow):
         # Serial Setup
         try:
             self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+            # Discard any buffered startup data from previous runs so the plot starts clean.
+            self.ser.reset_input_buffer()
+            self.ser.flush()
         except Exception as e:
             print(f"Serial Connection Error on {SERIAL_PORT}: {e}")
             self.ser = None
@@ -116,7 +119,7 @@ class TECControlGUI(QMainWindow):
         self.temp_plot.setLabel('bottom', "Time", units="s")
         self.temp_plot.setYRange(TEMP_MIN, TEMP_MAX)
         self.temp_plot.showGrid(x=True, y=True)
-        self.temp_curve = self.temp_plot.plot(pen=pg.mkPen('y', width=2))
+        self.temp_curve = self.temp_plot.plot(pen=pg.mkPen('b', width=2))
         main_layout.addWidget(self.temp_plot)
 
         # PWM Strip Chart (Red = Heating, Blue = Cooling)
@@ -126,7 +129,6 @@ class TECControlGUI(QMainWindow):
         self.pwm_plot.setYRange(0, 260)
         self.pwm_plot.showGrid(x=True, y=True)
 
-        # connect='finite' ensures NaN gaps do not connect solid lines
         self.pwm_heat_curve = self.pwm_plot.plot(pen=pg.mkPen('r', width=2.5), connect='finite')
         self.pwm_cool_curve = self.pwm_plot.plot(pen=pg.mkPen('b', width=2.5), connect='finite')
         main_layout.addWidget(self.pwm_plot)
@@ -179,11 +181,16 @@ class TECControlGUI(QMainWindow):
             self.lbl_time.setText(f"Time: {time_s:.2f} s")
             self.lbl_temp.setText(f"Temp: {temp_c:.2f} °C")
 
+            # Ignore stale startup samples that belong to a previous run.
+            if not self.time_data and time_s > 60.0:
+                print(f"Ignoring stale startup sample: time={time_s:.2f}s, pwm={pwm}, heat_cool={heat_cool}")
+                continue
+
             # Store Plot Data
             self.time_data.append(time_s)
             self.temp_data.append(temp_c)
 
-            # Separate heating and cooling series using NaN for correct line colors
+            # Split by direction so the graph shows red for heating and blue for cooling.
             if heat_cool == 1:
                 self.pwm_heat_data.append(pwm)
                 self.pwm_cool_data.append(np.nan)
