@@ -34,6 +34,14 @@ MIN_STEADY_SAMPLES = 8
 MAX_STEADY_SECONDS = 60.0
 CSV_STEADY_FILENAME = 'steady_state_temperature_scan.csv'
 SUMMARY_FILENAME = 'steady_state_summary.csv'
+AUTO_SWEEP_SECONDS = 30.0
+AUTO_SWEEP_SEQUENCE = [
+    ('HEAT', 0), ('COOL', 0),
+    ('HEAT', 25), ('COOL', 25),
+    ('HEAT', 50), ('COOL', 50),
+    ('HEAT', 75), ('COOL', 75),
+    ('HEAT', 100), ('COOL', 100),
+]
 
 
 def wait_for_steady_state(ser, direction, target_percent):
@@ -222,7 +230,7 @@ def run_steady_state_scan():
 
 
 class TECControlGUI(QMainWindow):
-    def __init__(self):
+    def __init__(self, auto_run=False):
         super().__init__()
         self.setWindowTitle("TEC Manual Control Interface")
         self.resize(950, 750)
@@ -325,6 +333,7 @@ class TECControlGUI(QMainWindow):
         main_layout.addLayout(ctrl_layout)
 
         self.last_temp_c = None
+        self.last_pwm_value = 0
 
         # --- Section 2: Charts ---
         # Temperature Strip Chart
@@ -351,6 +360,17 @@ class TECControlGUI(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.read_serial_data)
         self.timer.start(UPDATE_INTERVAL_MS)
+
+        # Automatic sweep state
+        self.auto_sweep_sequence = list(AUTO_SWEEP_SEQUENCE)
+        self.auto_sweep_index = 0
+        self.auto_sweep_timer = None
+        self.auto_sweep_results = []
+        self.auto_sweep_step_start = None
+        self.auto_sweep_step_temp = None
+
+        if auto_run:
+            self.start_auto_sweep()
 
     def send_command(self):
         """Formats and sends serial commands whenever GUI controls change."""
@@ -390,6 +410,7 @@ class TECControlGUI(QMainWindow):
             pwm = int(match.group(3))
             heat_cool = int(match.group(4))
             self.last_temp_c = temp_c
+            self.last_pwm_value = pwm
 
             if self.auto_shutdown.isChecked():
                 if temp_c >= self.SHUTDOWN_TEMP_C:
@@ -448,6 +469,69 @@ class TECControlGUI(QMainWindow):
             self.temp_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
             self.pwm_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
 
+    def start_auto_sweep(self):
+        """Run the full steady-state sweep automatically while keeping the live chart visible."""
+        self.auto_sweep_results = []
+        self.auto_sweep_index = 0
+        self._run_next_auto_step()
+
+    def _run_next_auto_step(self):
+        if self.auto_sweep_index >= len(self.auto_sweep_sequence):
+            self._finish_auto_sweep()
+            return
+
+        direction, percent = self.auto_sweep_sequence[self.auto_sweep_index]
+        requested_pwm = int(round((percent / 100.0) * 255))
+        self.radio_heat.setChecked(direction == 'HEAT')
+        self.radio_cool.setChecked(direction == 'COOL')
+        self.pwm_slider.setValue(requested_pwm)
+        self.send_command()
+
+        self.auto_sweep_step_start = time.monotonic()
+        self.auto_sweep_step_temp = self.last_temp_c
+        self.auto_sweep_timer = QTimer(self)
+        self.auto_sweep_timer.setSingleShot(True)
+        self.auto_sweep_timer.timeout.connect(self._capture_auto_step_result)
+        self.auto_sweep_timer.start(int(AUTO_SWEEP_SECONDS * 1000))
+
+    def _capture_auto_step_result(self):
+        direction, percent = self.auto_sweep_sequence[self.auto_sweep_index]
+        requested_pwm = int(round((percent / 100.0) * 255))
+        actual_pwm = self.last_pwm_value if self.last_pwm_value is not None else self.pwm_slider.value()
+
+        temp_value = self.last_temp_c if self.last_temp_c is not None else float('nan')
+        self.auto_sweep_results.append({
+            'direction': direction,
+            'requested_percent': percent,
+            'requested_pwm': requested_pwm,
+            'actual_pwm': actual_pwm,
+            'steady_temp_c': temp_value,
+            'time_s': time.monotonic() - self.auto_sweep_step_start if self.auto_sweep_step_start is not None else 0.0,
+        })
+
+        print(f"Auto-sweep step complete: {direction} @ {percent}% -> actual PWM {actual_pwm}, steady temp {temp_value:.2f}C")
+        self.auto_sweep_index += 1
+        self._run_next_auto_step()
+
+    def _finish_auto_sweep(self):
+        if not self.auto_sweep_results:
+            return
+
+        with open(CSV_STEADY_FILENAME, 'w', newline='') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(['direction', 'requested_percent', 'requested_pwm', 'actual_pwm', 'steady_temp_c', 'time_s'])
+            for row in self.auto_sweep_results:
+                writer.writerow([
+                    row['direction'],
+                    row['requested_percent'],
+                    row['requested_pwm'],
+                    row['actual_pwm'],
+                    row['steady_temp_c'],
+                    row['time_s'],
+                ])
+
+        print(f"Saved automatic sweep results to {CSV_STEADY_FILENAME}")
+
     def closeEvent(self, event):
         if self.ser and self.ser.is_open:
             self.ser.close()
@@ -461,8 +545,59 @@ if __name__ == '__main__':
         run_steady_state_scan()
     elif len(sys.argv) > 1 and sys.argv[1].lower() == '--summary':
         summarize_existing_csv()
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == '--auto-sweep':
+        app = QApplication(sys.argv)
+        window = TECControlGUI(auto_run=True)
+        window.show()
+        sys.exit(app.exec())
     else:
         app = QApplication(sys.argv)
         window = TECControlGUI()
         window.show()
         sys.exit(app.exec())
+
+
+
+import glob
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+# Load all 10 run files and plot each trace individually.
+file_paths = sorted(glob.glob("run_*.csv"))
+if len(file_paths) < 1:
+    raise FileNotFoundError("No run_*.csv files found in the current directory.")
+
+runs_data = []
+for path in file_paths[:10]:
+    df = pd.read_csv(path)
+    if "value" not in df.columns:
+        raise ValueError(f"Expected a 'value' column in {path}, but it was not found.")
+    runs_data.append(df["value"].to_numpy())
+
+traces = np.array(runs_data)
+steps = np.arange(traces.shape[1])
+
+plt.figure(figsize=(12, 7))
+for i, trace in enumerate(traces):
+    plt.plot(steps, trace, alpha=0.5, linewidth=1.5, label=f"Run {i+1}")
+
+mean_trace = np.mean(traces, axis=0)
+std_trace = np.std(traces, axis=0)
+plt.plot(steps, mean_trace, color="black", linewidth=2.5, label="Mean Trace")
+plt.fill_between(
+    steps,
+    mean_trace - std_trace,
+    mean_trace + std_trace,
+    color="black",
+    alpha=0.15,
+    label="±1 Std Dev",
+)
+
+plt.xlabel("Step / Time")
+plt.ylabel("Value / Metric")
+plt.title("All 10 Run Traces with Mean and Std Dev")
+plt.legend(loc="best")
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.tight_layout()
+plt.show()
