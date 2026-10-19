@@ -1,0 +1,347 @@
+"""
+Module 5: proportional (P-only) temperature control of the TEC.
+
+The only control law in this file is
+
+    e = T_SET_C - T
+    u = KP * e
+
+with one fixed gain, KP. There is no feed-forward, integral term or derivative
+term. The output clamp (0..255) and software safety shutdown are constraints,
+not part of the control law.
+
+Serial protocol is unchanged from Module 4:
+    Arduino -> PC : "Temperature (C): <T>, Time (s): <t>, PWM: <P>, Heat/Cool: <0|1>"
+    PC -> Arduino : "SET PWM <P> DIR <HEAT|COOL>"
+
+Temperature averaging: this script uses the temperature value the Arduino reports
+and does NOT average or filter it again. Confirm that the Arduino firmware
+averages ~1000 raw thermistor-voltage readings and converts the mean voltage to
+temperature before printing each "Temperature (C)" line.
+"""
+import sys
+import re
+import csv
+from datetime import datetime
+import serial
+import numpy as np
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                               QHBoxLayout, QLabel, QGroupBox, QCheckBox,
+                               QDoubleSpinBox)
+from PySide6.QtCore import Qt, QTimer
+import pyqtgraph as pg
+
+# =============================================================================
+# USER CONFIGURATION PARAMETERS
+# =============================================================================
+SERIAL_PORT = 'COM3'         # Serial port name
+BAUD_RATE = 9600             # Baud rate
+WINDOW_DURATION = 60.0       # Plot rolling window (seconds)
+UPDATE_INTERVAL_MS = 50      # Serial polling interval (ms)
+TEMP_MIN = 10.0              # Min plot temp (°C)
+TEMP_MAX = 50.0              # Max plot temp (°C)
+CSV_FILENAME = f"p_control_log_{datetime.now():%Y%m%d_%H%M%S}.csv"
+
+# ---- P-control parameters ----
+T_SET_C = 15.0               # Setpoint (°C)
+KP = 1.0                     # Proportional gain, PWM counts per °C
+
+# ---- Safety constraints (not part of the control law) ----
+PWM_MIN = 0                  # Output clamp, lower bound
+PWM_MAX = 255                # Output clamp, upper bound
+SHUTDOWN_TEMP_C = 60.0       # Force PWM = 0 at or above this temperature
+RECOVERY_TEMP_C = 55.0       # Release the shutdown at or below this temperature
+
+LINE_PATTERN = re.compile(
+    r"^Temperature \(C\):\s*([0-9\.-]+),\s*Time \(s\):\s*([0-9\.-]+),\s*PWM:\s*([0-9]+),\s*Heat/Cool:\s*([01])$"
+)
+
+
+def p_controller(temp_c, kp=KP):
+    """One P-control update. Returns (e, u, direction, pwm).
+
+    Lines 1-2 are the control law. The rest only converts u to an Arduino command.
+    """
+    e = T_SET_C - temp_c                          # error: e = T_set - T
+    u = kp * e                                    # control law: u = Kp * e
+    direction = "HEAT" if u >= 0 else "COOL"      # sign of u selects heat / cool
+    pwm = int(round(abs(u)))                      # P = |u| as an integer PWM magnitude
+    pwm = max(PWM_MIN, min(PWM_MAX, pwm))         # clamp P to 0..255
+    return e, u, direction, pwm
+
+
+class PControlGUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("TEC P-Control (Module 5)")
+        self.resize(950, 900)
+
+        # Plot data arrays
+        self.time_data = []
+        self.temp_data = []
+        self.err_data = []
+        self.pwm_heat_data = []
+        self.pwm_cool_data = []
+        self.step_run_counts = {}
+        self.active_step_run = None
+
+        # CSV logging
+        self.csv_file = open(CSV_FILENAME, 'x', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        if self.csv_file.tell() == 0:
+            self.csv_writer.writerow([
+                'time_s', 'temperature_C', 'setpoint_C', 'error_C', 'u_pwm', 'Kp',
+                'cmd_dir', 'cmd_pwm', 'reported_heat_cool', 'reported_pwm', 'shutdown_latched'])
+            self.csv_file.flush()
+
+        # Serial setup
+        try:
+            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+            # Discard buffered startup data from previous runs so the plot starts clean.
+            self.ser.reset_input_buffer()
+            self.ser.flush()
+        except Exception as e:
+            print(f"Serial Connection Error on {SERIAL_PORT}: {e}")
+            self.ser = None
+
+        self.shutdown_latched = False
+
+        # ---- GUI layout ----
+        self.setStyleSheet("QMainWindow { background-color: white; } QWidget { background-color: white; color: black; } QGroupBox { background-color: white; color: black; border: 1px solid #bdbdbd; } QLabel { color: black; }")
+        central_widget = QWidget()
+        central_widget.setStyleSheet("background-color: white; color: black;")
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        ctrl_layout = QHBoxLayout()
+
+        # Controller settings and enable switch.
+        # The controller starts DISABLED, so the Arduino receives PWM 0 until you tick the box.
+        ctl_box = QGroupBox("Controller")
+        ctl_inner = QVBoxLayout()
+        ctl_inner.addWidget(QLabel(f"Setpoint: {T_SET_C:.2f} °C"))
+        kp_layout = QHBoxLayout()
+        kp_layout.addWidget(QLabel("Kp (PWM/°C):"))
+        self.kp_spin = QDoubleSpinBox()
+        self.kp_spin.setRange(0.0, 1000.0)
+        self.kp_spin.setDecimals(2)
+        self.kp_spin.setSingleStep(0.25)
+        self.kp_spin.setValue(KP)
+        kp_layout.addWidget(self.kp_spin)
+        ctl_inner.addLayout(kp_layout)
+        self.enable_box = QCheckBox("Enable closed-loop control")
+        self.enable_box.setChecked(False)
+        self.enable_box.toggled.connect(self.on_enable_toggled)
+        ctl_inner.addWidget(self.enable_box)
+        ctl_box.setLayout(ctl_inner)
+
+        # Live status
+        disp_box = QGroupBox("Live Status")
+        disp_inner = QVBoxLayout()
+        self.lbl_time = QLabel("Time: 0.00 s")
+        self.lbl_temp = QLabel("Temp T: -- °C")
+        self.lbl_err = QLabel("Error e: -- °C")
+        self.lbl_u = QLabel("u = Kp·e: -- PWM")
+        self.lbl_cmd = QLabel("Sent: PWM 0, HEAT")
+        self.lbl_state = QLabel("State: control disabled")
+        self.lbl_log = QLabel(f"CSV log: {CSV_FILENAME}")
+        for lbl in (self.lbl_time, self.lbl_temp, self.lbl_err, self.lbl_u,
+                    self.lbl_cmd, self.lbl_state, self.lbl_log):
+            disp_inner.addWidget(lbl)
+        disp_box.setLayout(disp_inner)
+
+        ctrl_layout.addWidget(ctl_box)
+        ctrl_layout.addWidget(disp_box)
+        main_layout.addLayout(ctrl_layout)
+
+        # ---- Plots ----
+        # Temperature with setpoint line (green dashed)
+        pg.setConfigOption('background', 'w')
+        pg.setConfigOption('foreground', 'k')
+
+        self.temp_plot = pg.PlotWidget(title="Cooling Step Responses by Kp")
+        self.temp_plot.setBackground('w')
+        self.temp_plot.setLabel('left', "Temperature", units="°C")
+        self.temp_plot.setLabel('bottom', "Time since first nonzero command", units="s")
+        self.temp_plot.setYRange(TEMP_MIN, TEMP_MAX)
+        self.temp_plot.showGrid(x=True, y=True)
+        self.step_response_legend = self.temp_plot.addLegend()
+        self.temp_plot.addItem(pg.InfiniteLine(pos=T_SET_C, angle=0,
+                                               pen=pg.mkPen('#2ca02c', width=2, style=Qt.DashLine)))
+        main_layout.addWidget(self.temp_plot)
+
+        # Error e = T_set - T
+        self.err_plot = pg.PlotWidget(title="Error e = T_set - T vs. Arduino Time")
+        self.err_plot.setBackground('w')
+        self.err_plot.setLabel('left', "Error", units="°C")
+        self.err_plot.setLabel('bottom', "Time", units="s")
+        self.err_plot.showGrid(x=True, y=True)
+        self.err_curve = self.err_plot.plot(pen=pg.mkPen('#d62728', width=2))
+        self.err_plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('k', width=1)))
+        main_layout.addWidget(self.err_plot)
+
+        # PWM magnitude as reported by the Arduino (Red = Heating, Blue = Cooling)
+        self.pwm_plot = pg.PlotWidget(title="PWM Output vs. Arduino Time (red = heat, blue = cool)")
+        self.pwm_plot.setBackground('w')
+        self.pwm_plot.setLabel('left', "PWM Magnitude", units="0-255")
+        self.pwm_plot.setLabel('bottom', "Time", units="s")
+        self.pwm_plot.setYRange(0, 260)
+        self.pwm_plot.showGrid(x=True, y=True)
+        self.pwm_heat_curve = self.pwm_plot.plot(pen=pg.mkPen('#d62728', width=2.5), connect='finite')
+        self.pwm_cool_curve = self.pwm_plot.plot(pen=pg.mkPen('#1f77b4', width=2.5), connect='finite')
+        main_layout.addWidget(self.pwm_plot)
+
+        # Serial check timer
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.read_serial_data)
+        self.timer.start(UPDATE_INTERVAL_MS)
+
+    def send_command(self, direction, pwm):
+        """Send one command line to the Arduino."""
+        if self.ser and self.ser.is_open:
+            self.ser.write(f"SET PWM {pwm} DIR {direction}\n".encode('utf-8'))
+
+    def on_enable_toggled(self, checked):
+        if not checked:
+            self.active_step_run = None
+            self.send_command("HEAT", 0)   # stop driving the TEC when control is turned off
+            self.lbl_state.setText("State: control disabled")
+
+    def update_safety(self, temp_c):
+        """Software shutdown with hysteresis. Independent of the control law."""
+        if temp_c >= SHUTDOWN_TEMP_C:
+            if not self.shutdown_latched:
+                print(f"Temperature reached {SHUTDOWN_TEMP_C}°C; PWM forced to 0 until it drops to {RECOVERY_TEMP_C}°C.")
+            self.shutdown_latched = True
+        elif temp_c <= RECOVERY_TEMP_C and self.shutdown_latched:
+            self.shutdown_latched = False
+            print(f"Temperature dropped to {RECOVERY_TEMP_C}°C; shutdown released.")
+
+    def read_serial_data(self):
+        """One control update per incoming measurement line."""
+        if not self.ser or not self.ser.is_open:
+            return
+
+        while self.ser.in_waiting > 0:
+            try:
+                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            except Exception:
+                continue
+
+            match = LINE_PATTERN.match(line)
+            if not match:
+                continue
+
+            temp_c = float(match.group(1))
+            time_s = float(match.group(2))
+            reported_pwm = int(match.group(3))
+            reported_hc = int(match.group(4))
+
+            # Safety check runs on every parsed sample, before anything else.
+            self.update_safety(temp_c)
+
+            # Ignore stale startup samples left over from a previous run (never act on them).
+            if not self.time_data and time_s > 60.0:
+                print(f"Ignoring stale startup sample: time={time_s:.2f}s")
+                continue
+
+            # ---- P control (steps 2-6) ----
+            kp = self.kp_spin.value()
+            e, u, direction, pwm = p_controller(temp_c, kp)
+
+            # ---- Safety override and enable switch (steps 7) ----
+            if self.shutdown_latched or not self.enable_box.isChecked():
+                pwm = 0
+            self.send_command(direction, pwm)
+
+            if self.shutdown_latched:
+                self.lbl_state.setText("State: SAFETY SHUTDOWN (PWM forced to 0)")
+            elif self.enable_box.isChecked():
+                self.lbl_state.setText("State: closed-loop P control")
+
+            print(f"T={temp_c:.2f}  Tset={T_SET_C:.2f}  Kp={kp:.2f}  e={e:.2f}  "
+                  f"u={u:.2f}  sent: PWM {pwm} {direction}")
+
+            # CSV
+            self.csv_writer.writerow([time_s, temp_c, T_SET_C, e, u, kp, direction, pwm,
+                                      reported_hc, reported_pwm, int(self.shutdown_latched)])
+            self.csv_file.flush()
+
+            # Labels
+            self.lbl_time.setText(f"Time: {time_s:.2f} s")
+            self.lbl_temp.setText(f"Temp T: {temp_c:.2f} °C")
+            self.lbl_err.setText(f"Error e: {e:.2f} °C")
+            self.lbl_u.setText(f"u = Kp·e: {u:.2f} PWM")
+            self.lbl_cmd.setText(f"Sent: PWM {pwm}, {direction}")
+
+            if self.enable_box.isChecked():
+                if self.active_step_run is None and pwm > 0:
+                    run_number = self.step_run_counts.get(kp, 0) + 1
+                    self.step_run_counts[kp] = run_number
+                    colors = ['#1f77b4', '#d62728', '#9467bd', '#ff7f0e',
+                              '#2ca02c', '#17becf', '#8c564b', '#e377c2']
+                    curve = self.temp_plot.plot(
+                        pen=pg.mkPen(colors[(run_number - 1) % len(colors)], width=2.5))
+                    label = f"Kp={kp:g} (run {run_number})"
+                    self.step_response_legend.addItem(curve, label)
+                    self.active_step_run = {
+                        'start_time_s': time_s,
+                        'times_s': [],
+                        'temperatures_c': [],
+                        'curve': curve,
+                    }
+
+                if self.active_step_run is not None:
+                    elapsed_s = time_s - self.active_step_run['start_time_s']
+                    self.active_step_run['times_s'].append(elapsed_s)
+                    self.active_step_run['temperatures_c'].append(temp_c)
+                    self.active_step_run['curve'].setData(
+                        self.active_step_run['times_s'],
+                        self.active_step_run['temperatures_c'])
+                    self.temp_plot.setXRange(0.0, max(WINDOW_DURATION, elapsed_s))
+            else:
+                self.active_step_run = None
+
+            # Plot data (PWM trace uses the Arduino-reported value and direction)
+            self.time_data.append(time_s)
+            self.temp_data.append(temp_c)
+            self.err_data.append(e)
+            if reported_hc == 1:
+                self.pwm_heat_data.append(reported_pwm)
+                self.pwm_cool_data.append(np.nan)
+            else:
+                self.pwm_heat_data.append(np.nan)
+                self.pwm_cool_data.append(reported_pwm)
+
+            # Rolling window
+            cutoff = time_s - WINDOW_DURATION
+            while self.time_data and self.time_data[0] < cutoff:
+                self.time_data.pop(0)
+                self.temp_data.pop(0)
+                self.err_data.pop(0)
+                self.pwm_heat_data.pop(0)
+                self.pwm_cool_data.pop(0)
+
+            self.err_curve.setData(self.time_data, self.err_data)
+            self.pwm_heat_curve.setData(self.time_data, self.pwm_heat_data)
+            self.pwm_cool_curve.setData(self.time_data, self.pwm_cool_data)
+
+            xr = (max(0.0, cutoff), max(WINDOW_DURATION, time_s))
+            self.err_plot.setXRange(*xr)
+            self.pwm_plot.setXRange(*xr)
+
+    def closeEvent(self, event):
+        # Leave the TEC off when the window is closed.
+        self.send_command("HEAT", 0)
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        if self.csv_file and not self.csv_file.closed:
+            self.csv_file.close()
+        event.accept()
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = PControlGUI()
+    window.show()
+    sys.exit(app.exec())
