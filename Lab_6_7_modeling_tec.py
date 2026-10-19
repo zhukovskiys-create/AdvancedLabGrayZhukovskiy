@@ -864,8 +864,11 @@ class ModelingTECGui:
         toolbar = self.NavigationToolbar2Tk(self.canvas, plots, pack_toolbar=False)
         toolbar.update()
         toolbar.pack(fill=tk.X)
-        self.root.update_idletasks()
-        outer.sashpos(0, 700)
+        def position_plot_sash(_event: tk.Event) -> None:
+            outer.unbind("<Map>", map_binding)
+            self.root.after(100, lambda: outer.sashpos(0, 700))
+
+        map_binding = outer.bind("<Map>", position_plot_sash, add="+")
 
     def _render_math_symbol(self, expression: str) -> tk.PhotoImage:
         """Render a control symbol with the same math engine as the plots."""
