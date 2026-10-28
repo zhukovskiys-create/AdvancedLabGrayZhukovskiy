@@ -23,15 +23,19 @@ cooling.  Their ratio r = P_u,h/P_u,c = chi_h/chi_c defaults to 2.
     PI:        u = Kp*e + Ki*integral(e dt)
     e = T_set - T_measured
 
-Run the desktop GUI from the Phys39F26 repository root:
+Run the desktop GUI from this repository root:
 
-    .venv/bin/python python/Lab_6_7_modeling_tec.py
+    python Lab_6_7_modeling_tec.py
 
 Run a non-interactive two-lump demonstration and save a PNG:
 
-    .venv/bin/python python/Lab_6_7_modeling_tec.py --demo
+    python Lab_6_7_modeling_tec.py --demo
 
-No Arduino is needed. This is a mathematical model, not a hardware controller.
+The GUI can run the mathematical model or connect to the Module 7 Arduino
+controller over a 9600-baud serial connection. For hardware control, select
+"Arduino hardware", choose the board's serial port, connect, then resume.
+Start connected and paused with ``python Lab_6_7_modeling_tec.py --hardware
+--port COM3``.
 """
 
 from __future__ import annotations
@@ -47,8 +51,12 @@ import tempfile
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+import serial
+from serial.tools import list_ports
+
 
 UPDATE_INTERVAL_MS = 50
+ARDUINO_REPORT_INTERVAL_S = 5.0
 MAX_TEC_VOLTAGE_V = 12.0
 
 
@@ -168,6 +176,78 @@ class StepResult:
     i_pwm: float
     applied_pwm: float
     saturated: bool
+
+
+@dataclass(frozen=True)
+class ArduinoTelemetry:
+    """One validated DATA row from the six-thermistor Arduino sketch."""
+
+    time_s: float
+    tec_c: float
+    rod_temperatures_c: tuple[float, float, float, float, float]
+    pwm: int
+    heat_cool: int
+    safety: str
+
+
+def parse_arduino_data_line(line: str) -> ArduinoTelemetry | None:
+    """Parse one DATA CSV row; ignore headers and non-telemetry serial lines."""
+
+    line = line.strip()
+    if line == (
+        "DATA,time_s,tec_C,rod1_C,rod2_C,rod3_C,rod4_C,rod5_C,"
+        "pwm,heat_cool,setpoint_C,safety"
+    ):
+        return None
+    fields = line.split(",")
+    if not fields or fields[0] != "DATA":
+        return None
+    if len(fields) != 12:
+        raise ValueError(f"Expected 12 DATA fields, received {len(fields)}.")
+
+    try:
+        numeric = [float(fields[index]) for index in (1, 2, 3, 4, 5, 6, 7, 8, 9)]
+    except ValueError as error:
+        raise ValueError("DATA row contains a non-numeric measurement.") from error
+    if not all(math.isfinite(value) for value in numeric):
+        raise ValueError("DATA row contains a non-finite measurement.")
+
+    time_s, tec_c, *remaining = numeric
+    rods = tuple(remaining[:5])
+    pwm_value, heat_cool_value = remaining[5:]
+    if (
+        time_s < 0
+        or not 0 <= pwm_value <= 255
+        or not pwm_value.is_integer()
+        or heat_cool_value not in (0, 1)
+    ):
+        raise ValueError("DATA row contains an out-of-range time, PWM, or direction.")
+    if fields[11] not in {"OK", "SHUTDOWN"}:
+        raise ValueError(f"Unrecognized Arduino safety state: {fields[11]!r}.")
+    return ArduinoTelemetry(
+        time_s=time_s,
+        tec_c=tec_c,
+        rod_temperatures_c=rods,
+        pwm=int(pwm_value),
+        heat_cool=int(heat_cool_value),
+        safety=fields[11],
+    )
+
+
+def arduino_temperature_legend_labels(
+    tec_c: float, rod_temperatures_c: list[list[float]]
+) -> tuple[str, str, str, str, str, str]:
+    """Build legend text for the latest T0-T5 Arduino readings."""
+
+    temperatures = (tec_c,) + tuple(
+        values[-1] if values else math.nan for values in rod_temperatures_c
+    )
+    return tuple(
+        f"T{index} (A{index}): {temperature:.2f} C"
+        if math.isfinite(temperature)
+        else f"T{index} (A{index}): --"
+        for index, temperature in enumerate(temperatures)
+    )
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -563,7 +643,7 @@ class ModelingTECGui:
         (r"s", "Simulation speed", "simulation_speed", "sim s/real s", 1.0, 50.0, 1.0),
     )
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, hardware_port: str | None = None) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "phys39_matplotlib_cache")
         )
@@ -587,7 +667,7 @@ class ModelingTECGui:
         self.live_value_frames: dict[str, ttk.Frame] = {}
         self.live_symbol_cache: dict[str, tk.PhotoImage] = {}
         self.root = root
-        self.root.title("Module 6: TEC Control Models")
+        self.root.title("Module 6/7: TEC Control Models and Arduino Controller")
         self.root.geometry("1540x940")
         self.root.minsize(1260, 800)
 
@@ -596,6 +676,8 @@ class ModelingTECGui:
         self.process_mode = tk.StringVar(value="one_lump")
         self.controller_mode = tk.StringVar(value="p")
         self.parameter_source = tk.StringVar(value="measured")
+        self.run_mode = tk.StringVar(value="Simulation")
+        self.serial_port_name = tk.StringVar()
         self.anti_windup = tk.BooleanVar(value=self.defaults.anti_windup)
         self.mass_temperature_only = tk.BooleanVar(value=False)
         self.entries: dict[str, tk.DoubleVar] = {}
@@ -603,6 +685,13 @@ class ModelingTECGui:
         self.running = False
         self.syncing_derived_fields = False
         self.after_job: str | None = None
+        self.arduino_serial: serial.Serial | None = None
+        self.arduino_rx_buffer = bytearray()
+        self.arduino_integral_error_c_s = 0.0
+        self.arduino_last_time_s: float | None = None
+        self.rod_temperatures: list[list[float]] = [
+            [math.nan] for _ in range(5)
+        ]
 
         self.live_temperature = tk.StringVar()
         self.live_p = tk.StringVar()
@@ -616,14 +705,22 @@ class ModelingTECGui:
         self.live_p_prediction = tk.StringVar()
         self.live_damping = tk.StringVar()
         self.live_status = tk.StringVar()
+        self.arduino_status = tk.StringVar(value="Arduino disconnected")
         self.run_button_text = tk.StringVar(value="Resume")
 
         self._build_layout()
+        self._refresh_serial_ports()
         self._reset_experiment()
         for variable in self.entries.values():
             variable.trace_add("write", self._on_parameter_edit)
         self.anti_windup.trace_add("write", self._on_parameter_edit)
         self._schedule_next_tick()
+        self.root.protocol("WM_DELETE_WINDOW", self._close_window)
+        if hardware_port is not None:
+            self.run_mode.set("Arduino hardware")
+            self._change_run_mode()
+            self.serial_port_name.set(hardware_port)
+            self._toggle_arduino_connection()
 
     def _build_layout(self) -> None:
         outer = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
@@ -651,6 +748,7 @@ class ModelingTECGui:
             state="readonly",
             width=15,
         )
+        self.process_mode_box = process_box
         process_box.grid(row=row, column=1, columnspan=2, sticky="ew")
         process_box.bind("<<ComboboxSelected>>", self._change_process)
         row += 1
@@ -689,6 +787,41 @@ class ModelingTECGui:
         parameter_box.grid(row=row, column=1, columnspan=2, sticky="ew")
         parameter_box.bind("<<ComboboxSelected>>", self._change_parameter_source)
         row += 1
+
+        ttk.Label(controls, text="Run mode").grid(row=row, column=0, sticky="w")
+        run_mode_box = ttk.Combobox(
+            controls,
+            textvariable=self.run_mode,
+            values=("Simulation", "Arduino hardware"),
+            state="readonly",
+            width=18,
+        )
+        run_mode_box.grid(row=row, column=1, columnspan=2, sticky="ew")
+        run_mode_box.bind("<<ComboboxSelected>>", self._change_run_mode)
+        row += 1
+
+        serial_controls = ttk.Frame(controls)
+        serial_controls.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(2, 5))
+        ttk.Label(serial_controls, text="Arduino port").pack(side=tk.LEFT)
+        self.serial_port_box = ttk.Combobox(
+            serial_controls,
+            textvariable=self.serial_port_name,
+            state="readonly",
+            width=12,
+        )
+        self.serial_port_box.pack(side=tk.LEFT, padx=(5, 2))
+        self.serial_refresh_button = ttk.Button(
+            serial_controls, text="Refresh", command=self._refresh_serial_ports
+        )
+        self.serial_refresh_button.pack(side=tk.LEFT, padx=2)
+        self.serial_connect_button = ttk.Button(
+            serial_controls, text="Connect", command=self._toggle_arduino_connection
+        )
+        self.serial_connect_button.pack(side=tk.LEFT, padx=2)
+        ttk.Label(
+            controls, textvariable=self.arduino_status, anchor="w"
+        ).grid(row=row + 1, column=0, columnspan=3, sticky="ew")
+        row += 2
 
         for symbol, label, attribute, units, low, high, resolution in self.FIELD_SPECS:
             variable = tk.DoubleVar(value=getattr(self.defaults, attribute))
@@ -947,6 +1080,9 @@ class ModelingTECGui:
             self.syncing_derived_fields = False
 
     def _reset_experiment(self) -> None:
+        if self.running:
+            self._stop_running()
+        self.arduino_integral_error_c_s = 0.0
         try:
             self.config = self._read_config()
         except ValueError as error:
@@ -958,6 +1094,7 @@ class ModelingTECGui:
         self.times = [0.0]
         self.tec_temperatures = [self.config.initial_c]
         self.measured_temperatures = [self.config.initial_c]
+        self.rod_temperatures = [[math.nan] for _ in range(5)]
         self.p_terms = [0.0]
         self.i_terms = [0.0]
         self.commands = [0.0]
@@ -994,8 +1131,102 @@ class ModelingTECGui:
 
     def _change_controller(self, _event=None) -> None:
         self.state.integral_error_c_s = 0.0
+        self.arduino_integral_error_c_s = 0.0
         self.latest = self._current_result()
         self._draw()
+
+    def _change_run_mode(self, _event=None) -> None:
+        if self.running:
+            self._stop_running()
+        if self.run_mode.get() == "Arduino hardware":
+            self.process_mode.set("one_lump")
+        self.arduino_integral_error_c_s = 0.0
+        self.arduino_last_time_s = None
+        self._reset_experiment()
+
+    def _refresh_serial_ports(self) -> None:
+        ports = [port.device for port in list_ports.comports()]
+        self.serial_port_box.configure(values=ports)
+        if self.serial_port_name.get() not in ports:
+            self.serial_port_name.set(ports[0] if ports else "")
+        self.arduino_status.set(
+            "Arduino disconnected" if ports else "No serial ports found"
+        )
+
+    def _toggle_arduino_connection(self) -> None:
+        if self.arduino_serial is not None:
+            self._disconnect_arduino()
+            return
+        port_name = self.serial_port_name.get()
+        if not port_name:
+            messagebox.showerror(
+                "Select an Arduino port",
+                "Refresh the port list and select the Arduino port.",
+            )
+            return
+        try:
+            self.arduino_serial = serial.Serial(
+                port_name, 9600, timeout=0, write_timeout=1
+            )
+            self.arduino_rx_buffer.clear()
+            self.arduino_integral_error_c_s = 0.0
+            self.arduino_last_time_s = None
+            self.arduino_serial.write(b"SET PWM 0 DIR HEAT\n")
+        except (serial.SerialException, OSError) as error:
+            if self.arduino_serial is not None:
+                self.arduino_serial.close()
+                self.arduino_serial = None
+            messagebox.showerror("Arduino connection failed", str(error))
+            self.arduino_status.set(f"Connection failed: {error}")
+            return
+        self.serial_connect_button.configure(text="Disconnect")
+        self.serial_port_box.configure(state="disabled")
+        self.serial_refresh_button.configure(state="disabled")
+        self.arduino_status.set(
+            f"Connected to {port_name}; waiting for DATA telemetry"
+        )
+
+    def _disconnect_arduino(self) -> None:
+        self.running = False
+        self.run_button_text.set("Resume")
+        connection = self.arduino_serial
+        self.arduino_serial = None
+        disconnect_error: Exception | None = None
+        if connection is not None:
+            try:
+                connection.write(b"SET PWM 0 DIR HEAT\n")
+            except (serial.SerialException, OSError) as error:
+                disconnect_error = error
+            try:
+                connection.close()
+            except (serial.SerialException, OSError) as error:
+                if disconnect_error is None:
+                    disconnect_error = error
+        self.serial_connect_button.configure(text="Connect")
+        self.serial_port_box.configure(state="readonly")
+        self.serial_refresh_button.configure(state="normal")
+        if disconnect_error is not None:
+            self.arduino_status.set(
+                f"Disconnect safety command failed: {disconnect_error}"
+            )
+        else:
+            self.arduino_status.set("Arduino disconnected")
+
+    def _stop_running(self) -> None:
+        self.running = False
+        self.run_button_text.set("Resume")
+        if self.arduino_serial is not None:
+            try:
+                self.arduino_serial.write(b"SET PWM 0 DIR HEAT\n")
+            except (serial.SerialException, OSError) as error:
+                self._handle_arduino_error(error)
+
+    def _close_window(self) -> None:
+        self._stop_running()
+        self._disconnect_arduino()
+        if self.after_job is not None:
+            self.root.after_cancel(self.after_job)
+        self.root.destroy()
 
     def _change_parameter_source(self, _event=None) -> None:
         """Switch between measured inputs and independently entered constants."""
@@ -1006,6 +1237,7 @@ class ModelingTECGui:
         """Clear controller memory without resetting time or temperature."""
 
         self.state.integral_error_c_s = 0.0
+        self.arduino_integral_error_c_s = 0.0
         self.latest = self._current_result()
         self._draw()
 
@@ -1034,13 +1266,21 @@ class ModelingTECGui:
 
     def _toggle_running(self) -> None:
         if self.running:
-            self.running = False
-            self.run_button_text.set("Resume")
+            self._stop_running()
         else:
             try:
                 self.config = self._read_config()
             except ValueError as error:
                 messagebox.showerror("Check the model parameters", str(error))
+                return
+            if (
+                self.run_mode.get() == "Arduino hardware"
+                and self.arduino_serial is None
+            ):
+                messagebox.showerror(
+                    "Connect to the Arduino",
+                    "Connect to the Arduino before starting hardware control.",
+                )
                 return
             self.running = True
             self.run_button_text.set("Pause")
@@ -1050,7 +1290,9 @@ class ModelingTECGui:
         self.after_job = self.root.after(UPDATE_INTERVAL_MS, self._tick)
 
     def _tick(self) -> None:
-        if self.running:
+        if self.arduino_serial is not None:
+            self._poll_arduino()
+        if self.run_mode.get() != "Arduino hardware" and self.running:
             simulated_interval = (
                 self.config.simulation_speed * UPDATE_INTERVAL_MS / 1000.0
             )
@@ -1066,6 +1308,108 @@ class ModelingTECGui:
             self._trim_history()
             self._draw()
         self._schedule_next_tick()
+
+    def _poll_arduino(self) -> None:
+        connection = self.arduino_serial
+        if connection is None:
+            return
+        try:
+            available = connection.in_waiting
+            if available:
+                self.arduino_rx_buffer.extend(connection.read(available))
+            while b"\n" in self.arduino_rx_buffer:
+                raw_line, _, remainder = self.arduino_rx_buffer.partition(b"\n")
+                self.arduino_rx_buffer = bytearray(remainder)
+                line = raw_line.decode("ascii", errors="replace").strip()
+                try:
+                    telemetry = parse_arduino_data_line(line)
+                except ValueError as error:
+                    self.arduino_status.set(
+                        f"Ignored malformed Arduino DATA row: {error}"
+                    )
+                    continue
+                if telemetry is not None:
+                    self._handle_arduino_telemetry(telemetry)
+        except (serial.SerialException, OSError) as error:
+            self._handle_arduino_error(error)
+
+    def _handle_arduino_error(self, error: Exception) -> None:
+        self.running = False
+        self.run_button_text.set("Resume")
+        self._disconnect_arduino()
+        self.arduino_status.set(f"Arduino communication error: {error}")
+        messagebox.showerror("Arduino communication error", str(error))
+
+    def _handle_arduino_telemetry(self, telemetry: ArduinoTelemetry) -> None:
+        if self.run_mode.get() != "Arduino hardware":
+            return
+        if self.arduino_last_time_s is not None:
+            elapsed_s = telemetry.time_s - self.arduino_last_time_s
+            if elapsed_s <= 0.0:
+                self.arduino_status.set(
+                    "Ignored duplicate or out-of-order DATA row"
+                )
+                return
+        else:
+            elapsed_s = ARDUINO_REPORT_INTERVAL_S
+        self.arduino_last_time_s = telemetry.time_s
+        self.state.time_s = telemetry.time_s
+        self.state.tec_temperature_c = telemetry.tec_c
+        self.state.measured_temperature_c = telemetry.tec_c
+        self.state.integral_error_c_s = self.arduino_integral_error_c_s
+
+        hardware_config = replace(self.config, dt_s=elapsed_s)
+        error, p_term, i_term, command, saturated = controller_command(
+            self.state,
+            hardware_config,
+            "one_lump",
+            self.controller_mode.get(),
+            advance_integral=self.running and telemetry.safety != "SHUTDOWN",
+        )
+        self.arduino_integral_error_c_s = self.state.integral_error_c_s
+        if telemetry.safety == "SHUTDOWN":
+            command = 0.0
+        direction = "HEAT" if command >= 0.0 else "COOL"
+        pwm = int(round(abs(command))) if self.running else 0
+        try:
+            if self.arduino_serial is not None:
+                self.arduino_serial.write(
+                    f"SET PWM {pwm} DIR {direction}\n".encode("ascii")
+                )
+        except (serial.SerialException, OSError) as error:
+            self._handle_arduino_error(error)
+            return
+
+        applied_command = pwm if direction == "HEAT" else -pwm
+        self.latest = StepResult(
+            telemetry.time_s,
+            telemetry.tec_c,
+            telemetry.tec_c,
+            error,
+            p_term,
+            i_term,
+            applied_command,
+            saturated,
+        )
+        self.times.append(telemetry.time_s)
+        self.tec_temperatures.append(telemetry.tec_c)
+        self.measured_temperatures.append(telemetry.tec_c)
+        for rod_values, temperature in zip(
+            self.rod_temperatures, telemetry.rod_temperatures_c
+        ):
+            rod_values.append(temperature)
+        self.p_terms.append(p_term)
+        self.i_terms.append(i_term)
+        self.commands.append(applied_command)
+        self.errors.append(error)
+        self._trim_history()
+        self._draw()
+        status = (
+            f"Safety shutdown reported by Arduino at {telemetry.tec_c:.2f} °C"
+            if telemetry.safety == "SHUTDOWN"
+            else f"Arduino DATA received at {telemetry.time_s:.2f} s"
+        )
+        self.arduino_status.set(status)
 
     def _record(self, result: StepResult) -> None:
         self.times.append(result.time_s)
@@ -1089,6 +1433,9 @@ class ModelingTECGui:
             self.i_terms = self.i_terms[first:]
             self.commands = self.commands[first:]
             self.errors = self.errors[first:]
+            self.rod_temperatures = [
+                values[first:] for values in self.rod_temperatures
+            ]
 
     def _draw(self) -> None:
         self._update_field_states()
@@ -1100,7 +1447,25 @@ class ModelingTECGui:
         controller = self.controller_mode.get()
         target_temperature = controller_target_temperature(self.config, controller)
         target_label = r"$T_{ss}$" if controller == "open_loop" else r"$T_{set}$"
-        if process == "one_lump":
+        if self.run_mode.get() == "Arduino hardware":
+            temperature_labels = arduino_temperature_legend_labels(
+                self.tec_temperatures[-1], self.rod_temperatures
+            )
+            self.ax_temperature.plot(
+                self.times,
+                self.tec_temperatures,
+                color="tab:blue",
+                linewidth=2,
+                label=temperature_labels[0],
+            )
+            for index, temperatures in enumerate(self.rod_temperatures, start=1):
+                self.ax_temperature.plot(
+                    self.times,
+                    temperatures,
+                    linewidth=1,
+                    label=temperature_labels[index],
+                )
+        elif process == "one_lump":
             self.ax_temperature.plot(
                 self.times,
                 self.tec_temperatures,
@@ -1197,6 +1562,13 @@ class ModelingTECGui:
                 if time_s >= left
             )
         visible_temperatures.extend((self.config.ambient_c, target_temperature))
+        if self.run_mode.get() == "Arduino hardware":
+            visible_temperatures.extend(
+                temperature
+                for values in self.rod_temperatures
+                for time_s, temperature in zip(self.times, values)
+                if time_s >= left and math.isfinite(temperature)
+            )
         low_t = min(visible_temperatures)
         high_t = max(visible_temperatures)
         margin_t = max(1.0, 0.1 * (high_t - low_t))
@@ -1391,7 +1763,8 @@ class ModelingTECGui:
         run_state = "Running" if self.running else "Paused"
         self.live_status.set(
             f"{run_state} | {process.replace('_', ' ')} | "
-            f"{controller.replace('_', ' ')} | {self.parameter_source.get()}"
+            f"{controller.replace('_', ' ')} | {self.run_mode.get()} | "
+            f"{self.parameter_source.get()}"
         )
         self.canvas.draw_idle()
 
@@ -1400,6 +1773,9 @@ class ModelingTECGui:
 
         process = self.process_mode.get()
         controller = self.controller_mode.get()
+        self.process_mode_box.configure(
+            state="disabled" if self.run_mode.get() == "Arduino hardware" else "readonly"
+        )
         measured_parameters = self.parameter_source.get() == "measured"
         enabled = {
             attribute: True for attribute in self.field_widgets
@@ -1447,7 +1823,7 @@ class ModelingTECGui:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Consistent one- and two-lump Module 6 TEC simulation"
+        description="Module 6 TEC simulation and Module 7 Arduino controller"
     )
     parser.add_argument(
         "--demo", action="store_true", help="save a non-interactive two-lump PI plot"
@@ -1458,13 +1834,26 @@ def main() -> None:
         default=Path("python/Lab_6_7_modeling_tec_demo.png"),
         help="output path used with --demo",
     )
+    parser.add_argument(
+        "--hardware",
+        action="store_true",
+        help="start the GUI in Arduino hardware mode, paused at zero PWM",
+    )
+    parser.add_argument(
+        "--port",
+        help="serial port to connect on startup (requires --hardware), e.g. COM3",
+    )
     args = parser.parse_args()
     if args.demo:
         run_demo(args.output)
         return
+    if args.port and not args.hardware:
+        parser.error("--port requires --hardware")
+    if args.hardware and not args.port:
+        parser.error("--hardware requires --port")
 
     root = tk.Tk()
-    ModelingTECGui(root)
+    ModelingTECGui(root, hardware_port=args.port)
     root.mainloop()
 
 
