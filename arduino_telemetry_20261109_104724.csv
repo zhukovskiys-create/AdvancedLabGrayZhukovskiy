@@ -1,0 +1,1 @@
+DATA,elapsed_ms,operating_state,control_mode,run_segment,segment_duration_ms,segment_mean_C,segment_amplitude_C,segment_period_s,setpoint_C,feedforward_pwm,tec_C,rod1_C,rod2_C,rod3_C,rod4_C,rod5_C,raw_controller_pwm,cooling_compensation_ratio,applied_signed_pwm,diagnostic_ua_pwm,diagnostic_ub_pwm,diagnostic_omega_rad_s

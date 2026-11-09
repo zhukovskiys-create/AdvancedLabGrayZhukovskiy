@@ -643,7 +643,12 @@ class ModelingTECGui:
         (r"s", "Simulation speed", "simulation_speed", "sim s/real s", 1.0, 50.0, 1.0),
     )
 
-    def __init__(self, root: tk.Tk, hardware_port: str | None = None) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        hardware_port: str | None = None,
+        start_hardware: bool = False,
+    ) -> None:
         os.environ.setdefault(
             "MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "phys39_matplotlib_cache")
         )
@@ -674,7 +679,9 @@ class ModelingTECGui:
         self.defaults = ModelConfig()
         self.config = self.defaults
         self.process_mode = tk.StringVar(value="one_lump")
-        self.controller_mode = tk.StringVar(value="p")
+        self.controller_mode = tk.StringVar(
+            value="pi" if start_hardware else "p"
+        )
         self.parameter_source = tk.StringVar(value="measured")
         self.run_mode = tk.StringVar(value="Simulation")
         self.serial_port_name = tk.StringVar()
@@ -721,6 +728,8 @@ class ModelingTECGui:
             self._change_run_mode()
             self.serial_port_name.set(hardware_port)
             self._toggle_arduino_connection()
+            if start_hardware and self.arduino_serial is not None:
+                self._toggle_running()
 
     def _build_layout(self) -> None:
         outer = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
@@ -1843,6 +1852,11 @@ def main() -> None:
         "--port",
         help="serial port to connect on startup (requires --hardware), e.g. COM3",
     )
+    parser.add_argument(
+        "--start",
+        action="store_true",
+        help="start PI hardware control immediately (requires --hardware and --port)",
+    )
     args = parser.parse_args()
     if args.demo:
         run_demo(args.output)
@@ -1851,9 +1865,15 @@ def main() -> None:
         parser.error("--port requires --hardware")
     if args.hardware and not args.port:
         parser.error("--hardware requires --port")
+    if args.start and not args.hardware:
+        parser.error("--start requires --hardware and --port")
 
     root = tk.Tk()
-    ModelingTECGui(root, hardware_port=args.port)
+    ModelingTECGui(
+        root,
+        hardware_port=args.port,
+        start_hardware=args.start,
+    )
     root.mainloop()
 
 

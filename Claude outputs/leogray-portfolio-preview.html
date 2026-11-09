@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leo Gray | Portfolio</title>
+  <meta name="description" content="Portfolio of Leo Gray, physics student at Brandeis University: sensing, control and robotics projects.">
+  <style>
+/* Clean technical portfolio. Colors live in the variables below. */
+:root {
+  --bg: #fafaf7;
+  --surface: #ffffff;
+  --ink: #14181c;
+  --muted: #5b6670;
+  --line: #e1e4e6;
+  --accent: #0b6e6e;
+  --accent-ink: #ffffff;
+  --accent-soft: #e3f1f0;
+  --warn-bg: #fff4cc;
+  --warn-ink: #5c4400;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1315;
+    --surface: #161b1e;
+    --ink: #e8ecee;
+    --muted: #9aa5ad;
+    --line: #2a3237;
+    --accent: #5fc7c0;
+    --accent-ink: #06201f;
+    --accent-soft: #14302f;
+    --warn-bg: #3a3000;
+    --warn-ink: #ffe9a0;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+main:focus { outline: none; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.skip { position: absolute; left: -999px; top: 8px; background: var(--accent); color: var(--accent-ink); padding: 8px 12px; z-index: 10; }
+.skip:focus { left: 8px; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+
+/* header */
+.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+.bar { display: flex; align-items: center; justify-content: space-between; height: 58px; }
+.brand { font-family: var(--mono); font-weight: 600; color: var(--ink); text-decoration: none; letter-spacing: -0.01em; }
+.brand span { color: var(--accent); }
+nav { display: flex; gap: 18px; font-size: 0.92rem; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover { color: var(--ink); }
+
+/* hero */
+.hero { padding: 72px 0 40px; }
+.eyebrow { font-family: var(--mono); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); margin: 0 0 14px; }
+.hero h1 { font-size: clamp(2.2rem, 6vw, 3.6rem); line-height: 1.08; margin: 0 0 16px; letter-spacing: -0.02em; }
+.hero .lede { font-size: 1.2rem; color: var(--muted); max-width: 40em; margin: 0 0 14px; }
+.hero .seeking { font-family: var(--mono); font-size: 0.88rem; color: var(--ink); background: var(--accent-soft); display: inline-block; padding: 6px 12px; border-radius: 6px; margin: 6px 0 22px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.btn { display: inline-block; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none; font-size: 0.92rem; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+/* sections */
+section { padding: 36px 0; border-top: 1px solid var(--line); }
+section > h2 { font-family: var(--mono); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin: 0 0 22px; font-weight: 600; }
+
+/* project cards */
+.grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
+.grid.featured { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.card { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; color: inherit; text-decoration: none; transition: border-color .15s, transform .15s; }
+.card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.media { aspect-ratio: 16 / 9; width: 100%; object-fit: cover; display: block; border-bottom: 1px solid var(--line); background: var(--accent-soft); }
+.ph { aspect-ratio: 16 / 9; display: flex; align-items: flex-end; padding: 12px 14px; border-bottom: 1px solid var(--line);
+  background-color: var(--accent-soft);
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 24px 24px; font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
+.card .body { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.meta { font-family: var(--mono); font-size: 0.76rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.card h3 { margin: 0; font-size: 1.15rem; line-height: 1.3; letter-spacing: -0.01em; }
+.card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 6px; }
+.tag { font-family: var(--mono); font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--bg); }
+
+/* filter chips */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
+.chip { font: inherit; font-family: var(--mono); font-size: 0.78rem; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* experience / skills */
+.timeline { display: grid; gap: 18px; }
+.job h3 { margin: 0; font-size: 1.05rem; }
+.job .when { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin: 2px 0 6px; }
+.job p { margin: 0; color: var(--muted); max-width: 46em; }
+.skillgroups { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+.skillgroups h3 { font-size: 0.95rem; margin: 0 0 8px; }
+.skillgroups ul { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+.skillgroups li { font-family: var(--mono); font-size: 0.78rem; padding: 3px 9px; border-radius: 6px; background: var(--accent-soft); }
+
+/* project page */
+.back { display: inline-block; margin: 28px 0 8px; font-family: var(--mono); font-size: 0.85rem; text-decoration: none; }
+.proj h1 { font-size: clamp(1.8rem, 4.5vw, 2.6rem); line-height: 1.12; margin: 8px 0 12px; letter-spacing: -0.02em; }
+.proj .lede { font-size: 1.12rem; color: var(--muted); max-width: 42em; margin: 0 0 22px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 22px 0 8px; }
+.fact { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 10px 14px; }
+.fact b { display: block; font-family: var(--mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 2px; font-weight: 600; }
+.prose { max-width: 46em; }
+.prose h2 { font-size: 1.3rem; margin: 34px 0 8px; letter-spacing: -0.01em; text-transform: none; font-family: var(--sans); color: var(--ink); }
+.prose p { margin: 0 0 14px; }
+.prose ul { padding-left: 1.2em; }
+.gallery { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin: 18px 0; }
+.gallery figure { margin: 0; }
+.gallery img { width: 100%; border: 1px solid var(--line); border-radius: 8px; display: block; }
+.gallery figcaption { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+.todo { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 12px 16px; margin: 28px 0; font-size: 0.92rem; }
+.todo b { font-family: var(--mono); }
+
+footer { padding: 36px 20px 60px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.88rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
+
+@media (max-width: 600px) {
+  nav { gap: 12px; font-size: 0.85rem; }
+  .hero { padding-top: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .card { transition: none; }
+}
+
+/* skills page */
+.skillspage .lede { max-width: 42em; color: var(--muted); font-size: 1.1rem; margin: 0 0 8px; }
+.skillgroup { padding: 28px 0; border-top: 1px solid var(--line); }
+.skillgroup > h2 { font-family: var(--mono); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin: 0 0 16px; font-weight: 600; }
+.skilllist { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.skillcard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 6px; }
+.skillcard h3 { margin: 0; font-size: 1.02rem; }
+.skillcard p { margin: 0; color: var(--muted); font-size: 0.93rem; }
+.proof { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 8px; }
+.proof a { font-family: var(--mono); font-size: 0.74rem; padding: 3px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--ink); text-decoration: none; border: 1px solid transparent; }
+.proof a:hover { border-color: var(--accent); }
+.more { margin-top: 14px; }
+
+</style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <div class="wrap bar">
+      <a class="brand" id="brand" href="#/"></a>
+      <nav id="nav" aria-label="Main"></nav>
+    </div>
+  </header>
+  <main id="main" class="wrap" tabindex="-1"></main>
+  <footer id="footer" class="wrap"></footer>
+  <noscript><p class="wrap">This portfolio needs JavaScript to show its projects. Please enable it, or email me directly.</p></noscript>
+  <script>
+/* ==========================================================================
+   YOUR CONTENT LIVES HERE. Edit this file; you should not need to touch
+   index.html, css/style.css or js/app.js to add a project.
+
+   TO ADD A PROJECT: copy the template at the bottom of this file into the
+   PROJECTS list (newest first is a good habit), fill it in, and save.
+   Put images in assets/images/ and refer to them as "assets/images/name.jpg".
+
+   Add ?preview to the site address (for example index.html?preview) to see
+   the private "still to add" notes on each project. Visitors never see them.
+   ========================================================================== */
+
+window.SITE = {
+  name: "Leo Gray",
+  tagline: "Physics student building things that sense, move and measure.",
+  intro: "I'm a physics major at Brandeis University with a minor in journalism. I like projects where hardware, firmware and data meet: temperature controllers, a pulse oximeter, and a walking combat robot.",
+  seeking: "Looking for: technician and entry-level engineering roles in photonics, test and robotics",
+  education: {
+    school: "Brandeis University",
+    degree: "B.S. in Physics, minor in Journalism",
+    when: "Expected May 2027",
+    coursework: "Intro to Design Methodology, Engineering Instrumentation, Physics Lab I and II, Electromagnetism, Linear Algebra, Problem Solving in Python"
+  },
+  experience: [
+    {
+      role: "Lab Assistant, Physics Department",
+      org: "Brandeis University",
+      when: "Present",
+      text: "Support a faculty research group working on the CERN particle collider upgrade, applying machine learning with PyTorch and TensorFlow."
+    },
+    {
+      role: "Vice President, Brandeis Robotics Team (Deisy Robotics)",
+      org: "Brandeis University",
+      when: "Sep 2023 - Present",
+      text: "Manage team operations, organize events and oversee construction of team projects using CAD and 3D printing resources."
+    }
+  ],
+  skills: [
+    { group: "CAD and fabrication", items: ["Fusion 360", "AutoCAD", "FDM 3D printing", "Rapid prototyping"] },
+    { group: "Electronics", items: ["KiCad", "Soldering", "WaveForms", "Sensor integration", "Arduino firmware"] },
+    { group: "Programming", items: ["Python", "C++", "Java", "R Studio"] },
+    { group: "Controls and modeling", items: ["P, PI and feedforward control", "Thermal modeling", "Data logging and analysis"] },
+    { group: "Machine learning", items: ["PyTorch", "TensorFlow", "Neural networks"] }
+  ],
+  /* Leave a link empty ("") to hide its button. Confirm these before you publish. */
+  email: "leogray@brandeis.edu",
+  github: "https://github.com/LeoGray536",
+  linkedin: "",
+  resume: "",            /* for example "assets/Leo_Gray_Resume.pdf" */
+  footerNote: "Built by hand with plain HTML, CSS and JavaScript."
+};
+
+window.PROJECTS = [
+  {
+    id: "walking-combat-bot",
+    title: "Combat Robotics Walking Bot",
+    kind: "Robotics",
+    status: "Ongoing",
+    dates: "Feb 2024 - Present",
+    featured: true,
+    summary: "A 3-lb combat robot that walks using the torque from its angular-mounted weapons for locomotion.",
+    tags: ["Rapid prototyping", "Mechanical design", "Robotics"],
+    image: "",
+    imageAlt: "",
+    role: "Independent project",
+    tools: [],
+    sections: [
+      { heading: "The idea",
+        body: ["A novel 3-lb walking bot that uses the torque from its angular-mounted weapons for locomotion."] },
+      { heading: "Prototyping",
+        body: ["I am fabricating a 1-lb plastic prototype to test how effective torque-driven motion is, and using it to iterate on the design constraints."] }
+    ],
+    results: [],
+    links: [],
+    needs: [
+      "Add photos or a short video of the prototype walking.",
+      "Motors and drive electronics: which parts, and why.",
+      "Test results: step length, speed, battery life, what failed and what you changed.",
+      "A CAD render or exploded view of the 3-lb design.",
+      "Add the CAD and fabrication tools you used (your resume lists Fusion 360 and FDM 3D printing, but does not tie them to this project)."
+    ]
+  },
+  {
+    id: "pulse-oximeter",
+    title: "Pulse Oximeter",
+    kind: "Electronics",
+    status: "Complete",
+    dates: "Spring 2025",
+    featured: true,
+    summary: "A functional pulse oximeter that integrates sensor hardware to monitor blood oxygen levels.",
+    tags: ["Sensors", "Electronics"],
+    image: "",
+    imageAlt: "",
+    role: "Brandeis University project",
+    tools: ["Sensor hardware"],
+    sections: [
+      { heading: "Overview",
+        body: ["I designed and built a working pulse oximeter at Brandeis, integrating sensor hardware to monitor blood oxygen levels."] }
+    ],
+    results: [],
+    links: [],
+    needs: [
+      "Which sensor and microcontroller you used, and how the light is measured.",
+      "How you checked it: accuracy against a commercial oximeter, with a plot or table.",
+      "A photo of the build and the schematic or board layout.",
+      "Add the tools you used (for example KiCad, soldering, WaveForms) once you confirm they were part of this build."
+    ]
+  },
+  {
+    id: "tec-temperature-controller",
+    title: "Thermoelectric Temperature Controller",
+    kind: "Controls",
+    status: "Complete",
+    dates: "Fall 2026",
+    featured: false,
+    summary: "A temperature controller built from the sensor up: thermistors, an H-bridge, Arduino firmware and a Python interface, with P, PI and feedforward control tested on real hardware.",
+    tags: ["Arduino", "Python", "Control systems", "Data acquisition", "Thermal modeling"],
+    image: "",
+    imageAlt: "",
+    role: "Brandeis Advanced Lab, with a lab partner",
+    tools: ["Arduino (C++)", "Python", "PySide6", "pyqtgraph", "pySerial", "Thermistors", "H-bridge", "Thermoelectric cooler"],
+    sections: [
+      { heading: "What it does",
+        body: ["A thermoelectric cooler (TEC) heats or cools depending on the direction of current, which makes it a good platform for learning feedback control. Over several lab modules my partner and I built the whole system: sensing, power electronics, firmware, a PC interface, and the control and modeling on top."] },
+      { heading: "Firmware and safety",
+        body: ["The Arduino converts thermistor readings to temperature with the Beta equation, averaging 500 samples per reading, and drives the TEC through an H-bridge using a signed PWM value (positive heats, negative cools). A custom serial protocol carries commands and telemetry. A 60 C software cutoff shuts the output off, backed by an independent hardware thermal switch at about 70 C.",
+               "A later version reads six thermistor channels every 5 seconds and accepts uploaded setpoint schedules, including sinusoidal setpoints."] },
+      { heading: "PC interface and automation",
+        body: ["A PySide6 and pyqtgraph application plots live temperature, logs everything to CSV, and runs automated steady-state sweeps: heating and cooling at 0, 25, 50, 75 and 100 percent power, waiting for each temperature to settle before moving on."] },
+      { heading: "Control and modeling",
+        body: ["We implemented proportional (P) control, then PI control with anti-windup and feedforward built from the measured steady-state heating and cooling curves. A one- and two-lump thermal model simulates the system, and the same interface can drive either the model or the real hardware."] }
+    ],
+    results: [
+      "With a 15 C setpoint, low proportional gains (2 or less) left the temperature about 6 C above the setpoint, while a gain of 12 held it at 15.5 C with almost no scatter.",
+      "The software cutoff and hardware switch give two independent layers of over-temperature protection.",
+      "Steady-state sweeps cover five power levels in both heating and cooling."
+    ],
+    links: [],
+    needs: [
+      "Add plots: the repo has ten_step_graphs, trace_plots and steady_state_temperature_vs_signed_pwm.png. Copy the best into assets/images and add them as images.",
+      "Add the GitHub repo link once your lab partner confirms it is public, and ask their permission before naming them.",
+      "Say which parts you wrote versus your partner.",
+      "Add one more number if you have it: temperature accuracy, or the time constant you measured."
+    ]
+  },
+  {
+    id: "prosthetic-hand",
+    title: "Prosthetic Hand",
+    kind: "Mechanical design",
+    status: "Complete",
+    dates: "Spring 2023",
+    featured: false,
+    summary: "A remodeled, FDM-manufacturable prosthetic hand, redesigned with design methodology to improve functionality and manufacturability.",
+    tags: ["CAD", "3D printing", "Design for manufacturing"],
+    image: "",
+    imageAlt: "",
+    role: "Brandeis University project",
+    tools: ["CAD", "FDM 3D printing"],
+    sections: [
+      { heading: "Overview",
+        body: ["I remodeled and built a prosthetic hand that can be produced on an FDM 3D printer, applying design methodology to improve both how it works and how easily it can be made."] }
+    ],
+    results: [],
+    links: [],
+    needs: [
+      "What you changed from the original design, and why it prints better.",
+      "Photos of the finished hand and a CAD render.",
+      "Any measurement: print time, part count, grip test."
+    ]
+  }
+];
+
+
+/* ------------------------------ SKILLS PAGE ------------------------------
+   Each skill can have:
+     note:     one sentence on what you actually did with it
+     projects: ids of projects (from the list above) that prove it
+     link:     { label, href } for evidence that is not a project page
+   A skill with no note and no projects is shown in the "Also familiar with"
+   list at the bottom. Only list what you can talk about in an interview.
+   Add skills you are learning to SITE.learning below; it stays hidden while empty.
+--------------------------------------------------------------------------- */
+window.SITE.skillsIntro = "Each skill links to the projects where I used it. Skills I have not yet used in a project are listed separately at the bottom.";
+window.SITE.skillsDetail = [
+  { group: "Controls and modeling", skills: [
+    { name: "P, PI and feedforward control",
+      note: "Implemented P control, PI control with anti-windup, and feedforward built from measured steady-state curves, then compared gains on real hardware.",
+      projects: ["tec-temperature-controller"] },
+    { name: "Thermal modeling and simulation",
+      note: "Built one- and two-lump thermal models to simulate the controller; the same interface can drive the model or the real hardware.",
+      projects: ["tec-temperature-controller"] },
+    { name: "Data logging and analysis",
+      note: "CSV logging, automated steady-state sweeps and plots of every run.",
+      projects: ["tec-temperature-controller"] }
+  ]},
+  { group: "Embedded systems and electronics", skills: [
+    { name: "Arduino firmware (C++)",
+      note: "Thermistor reading with 500-sample averaging, signed PWM to an H-bridge, a serial command protocol and a software over-temperature cutoff.",
+      projects: ["tec-temperature-controller"] },
+    { name: "Sensor integration",
+      note: "Integrated sensor hardware in a pulse oximeter, and read six thermistor channels in the temperature controller.",
+      projects: ["pulse-oximeter", "tec-temperature-controller"] },
+    { name: "Safety and fault handling",
+      note: "Two independent over-temperature protections: a 60 C software cutoff and a hardware thermal switch at about 70 C.",
+      projects: ["tec-temperature-controller"] }
+  ]},
+  { group: "Programming", skills: [
+    { name: "Python",
+      note: "Control and data-acquisition applications (PySide6, tkinter), serial communication, simulation and plotting.",
+      projects: ["tec-temperature-controller"] },
+    { name: "C++",
+      note: "Firmware for the thermoelectric temperature controller.",
+      projects: ["tec-temperature-controller"] },
+    { name: "Git and GitHub",
+      note: "Shared repository with a lab partner, including merges and a pull request.",
+      projects: ["tec-temperature-controller"] }
+  ]},
+  { group: "Machine learning", skills: [
+    { name: "PyTorch, TensorFlow and neural networks",
+      note: "Applied in my lab assistant role supporting the CERN collider upgrade.",
+      link: { label: "See experience", href: "#/experience" } }
+  ]},
+  { group: "CAD and fabrication", skills: [
+    { name: "CAD (Fusion 360, AutoCAD)",
+      note: "Remodeled a prosthetic hand in CAD so it can be manufactured on an FDM printer.",
+      projects: ["prosthetic-hand"] },
+    { name: "FDM 3D printing",
+      note: "Designed the prosthetic hand to be FDM-manufacturable.",
+      projects: ["prosthetic-hand"] },
+    { name: "Rapid prototyping and design iteration",
+      note: "Fabricating a 1-lb plastic prototype to test torque-driven motion and iterate on design constraints.",
+      projects: ["walking-combat-bot"] },
+    { name: "Design for manufacturing",
+      note: "Remodeled the prosthetic hand so it can be produced on an FDM printer.",
+      projects: ["prosthetic-hand"] }
+  ]},
+  { group: "Teamwork and leadership", skills: [
+    { name: "Team leadership",
+      note: "Vice President of Brandeis Robotics (Deisy Robotics): team operations, events and project construction.",
+      link: { label: "See experience", href: "#/experience" } }
+  ]},
+  { group: "Also familiar with", skills: [
+    { name: "KiCad" }, { name: "Soldering" }, { name: "WaveForms" },
+    { name: "Java" }, { name: "R Studio" }, { name: "Electromagnetism and waves (coursework)" },
+    { name: "Engineering instrumentation (coursework)" }
+  ]}
+];
+/* Skills you are actively learning, shown as a short list on the Skills page.
+   Example: ["ROS 2", "MATLAB"]. Leave empty to hide the section. */
+window.SITE.learning = [];
+
+/* ---------------------------- PROJECT TEMPLATE ----------------------------
+  Copy everything between the braces into the PROJECTS list above. Delete any
+  field you do not need; empty ones are simply skipped on the page.
+
+  {
+    id: "short-url-name",              // letters, numbers and dashes only
+    title: "Project Title",
+    kind: "Robotics",                  // one word or short phrase
+    status: "Complete",                // Ongoing, Complete, Paused...
+    dates: "Mon YYYY - Mon YYYY",
+    featured: false,                   // true puts it at the top of the home page
+    summary: "One or two sentences that make someone want to read more.",
+    tags: ["Python", "OpenCV"],        // used for the filter buttons
+    image: "assets/images/cover.jpg",
+    imageAlt: "What the picture shows",
+    role: "What you did",
+    team: "Team of 2",
+    tools: ["Fusion 360", "Arduino"],
+    sections: [
+      { heading: "The problem", body: ["Paragraph one.", "Paragraph two."] },
+      { heading: "How it works", body: ["..."] }
+    ],
+    gallery: [
+      { src: "assets/images/plot1.png", alt: "Describe the plot", caption: "Figure 1: ..." }
+    ],
+    results: ["A measured result with a number."],
+    links: [ { label: "Source code", url: "https://github.com/..." } ],
+    needs: ["Private reminder to yourself; only shown with ?preview."]
+  }
+------------------------------------------------------------------------- */
+
+</script>
+  <script>
+/* Renders the portfolio from data/site.js. You normally never edit this file. */
+(function () {
+  "use strict";
+
+  var S = window.SITE || {};
+  var P = window.PROJECTS || [];
+  var PREVIEW = /[?&]preview(=|&|$)/.test(window.location.search);
+  var main = document.getElementById("main");
+  var activeTag = "All";
+
+  function el(tag, attrs, kids) {
+    var e = document.createElement(tag);
+    var k;
+    attrs = attrs || {};
+    for (k in attrs) {
+      if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
+      var v = attrs[k];
+      if (v === null || v === undefined || v === false) continue;
+      if (k === "class") e.className = v;
+      else if (k === "text") e.textContent = v;
+      else e.setAttribute(k, v);
+    }
+    (kids || []).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    });
+    return e;
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  function safeUrl(u) {
+    return /^(https?:|mailto:|assets\/|\.\/|#)/.test(u || "") ? u : "";
+  }
+
+  /* ------------------------------ shared pieces ------------------------------ */
+  function renderChrome() {
+    var brand = document.getElementById("brand");
+    clear(brand);
+    var parts = (S.name || "Portfolio").split(" ");
+    brand.appendChild(document.createTextNode(parts[0] + " "));
+    brand.appendChild(el("span", { text: parts.slice(1).join(" ") }));
+
+    var nav = document.getElementById("nav");
+    clear(nav);
+    [["Projects", "#/projects"], ["Experience", "#/experience"], ["Skills", "#/skills"], ["Contact", "#/contact"]]
+      .forEach(function (l) { nav.appendChild(el("a", { href: l[1], text: l[0] })); });
+
+    var foot = document.getElementById("footer");
+    clear(foot);
+    foot.appendChild(el("span", { text: "© " + new Date().getFullYear() + " " + (S.name || "") }));
+    if (S.footerNote) foot.appendChild(el("span", { text: S.footerNote }));
+  }
+
+  function mediaFor(p) {
+    if (p.image) {
+      return el("img", { class: "media", src: safeUrl(p.image), alt: p.imageAlt || p.title, loading: "lazy" });
+    }
+    return el("div", { class: "ph", "aria-hidden": "true", text: p.kind || "" });
+  }
+
+  function tagRow(tags) {
+    return el("div", { class: "tags" }, (tags || []).map(function (t) { return el("span", { class: "tag", text: t }); }));
+  }
+
+  function card(p) {
+    var meta = el("div", { class: "meta" }, [
+      p.kind && el("span", { text: p.kind }),
+      p.status && el("span", { text: p.status }),
+      p.dates && el("span", { text: p.dates })
+    ]);
+    return el("a", { class: "card", href: "#/p/" + encodeURIComponent(p.id) }, [
+      mediaFor(p),
+      el("div", { class: "body" }, [
+        meta,
+        el("h3", { text: p.title }),
+        el("p", { text: p.summary || "" }),
+        tagRow(p.tags)
+      ])
+    ]);
+  }
+
+  /* ---------------------------------- home ---------------------------------- */
+  function heroSection() {
+    var links = [];
+    if (S.github) links.push(el("a", { class: "btn", href: safeUrl(S.github), text: "GitHub" }));
+    if (S.linkedin) links.push(el("a", { class: "btn", href: safeUrl(S.linkedin), text: "LinkedIn" }));
+    if (S.resume) links.push(el("a", { class: "btn", href: safeUrl(S.resume), text: "Resume (PDF)" }));
+    if (S.email) links.unshift(el("a", { class: "btn primary", href: "mailto:" + S.email, text: "Email me" }));
+    return el("section", { class: "hero", id: "top", style: "border-top:0" }, [
+      el("p", { class: "eyebrow", text: "Portfolio" }),
+      el("h1", { text: S.name || "" }),
+      el("p", { class: "lede", text: S.tagline || "" }),
+      S.intro && el("p", { class: "lede", text: S.intro }),
+      S.seeking && el("p", { class: "seeking", text: S.seeking }),
+      el("div", { class: "actions" }, links)
+    ]);
+  }
+
+  function projectsSection() {
+    var tags = ["All"];
+    P.forEach(function (p) { (p.tags || []).forEach(function (t) { if (tags.indexOf(t) < 0) tags.push(t); }); });
+
+    var featured = P.filter(function (p) { return p.featured; });
+    var kids = [];
+
+    if (featured.length) {
+      kids.push(el("section", { id: "featured" }, [
+        el("h2", { text: "Featured projects" }),
+        el("div", { class: "grid featured" }, featured.map(card))
+      ]));
+    }
+
+    var grid = el("div", { class: "grid", id: "grid" });
+    var chips = el("div", { class: "chips", role: "group", "aria-label": "Filter projects by skill" });
+
+    function fill() {
+      clear(grid);
+      P.filter(function (p) { return activeTag === "All" || (p.tags || []).indexOf(activeTag) >= 0; })
+        .forEach(function (p) { grid.appendChild(card(p)); });
+      Array.prototype.forEach.call(chips.children, function (c) {
+        c.setAttribute("aria-pressed", c.textContent === activeTag ? "true" : "false");
+      });
+    }
+    tags.forEach(function (t) {
+      var b = el("button", { class: "chip", type: "button", text: t, "aria-pressed": "false" });
+      b.addEventListener("click", function () { activeTag = t; fill(); });
+      chips.appendChild(b);
+    });
+    fill();
+
+    kids.push(el("section", { id: "projects" }, [el("h2", { text: "All projects" }), chips, grid]));
+    return kids;
+  }
+
+  function experienceSection() {
+    var items = (S.experience || []).map(function (j) {
+      return el("div", { class: "job" }, [
+        el("h3", { text: j.role }),
+        el("div", { class: "when", text: [j.org, j.when].filter(Boolean).join("  |  ") }),
+        el("p", { text: j.text || "" })
+      ]);
+    });
+    var edu = S.education;
+    if (edu) {
+      items.push(el("div", { class: "job" }, [
+        el("h3", { text: edu.school + ": " + edu.degree }),
+        el("div", { class: "when", text: edu.when || "" }),
+        edu.coursework && el("p", { text: "Relevant coursework: " + edu.coursework })
+      ]));
+    }
+    return el("section", { id: "experience" }, [el("h2", { text: "Experience and education" }), el("div", { class: "timeline" }, items)]);
+  }
+
+  function skillsSection() {
+    var groups = (S.skills || []).map(function (g) {
+      return el("div", {}, [
+        el("h3", { text: g.group }),
+        el("ul", {}, g.items.map(function (i) { return el("li", { text: i }); }))
+      ]);
+    });
+    return el("section", { id: "skills" }, [
+      el("h2", { text: "Skills" }),
+      el("div", { class: "skillgroups" }, groups),
+      S.skillsDetail ? el("p", { class: "more" }, [el("a", { class: "btn", href: "#/skills", text: "See the projects behind each skill" })]) : null
+    ]);
+  }
+
+  function contactSection() {
+    var links = [];
+    if (S.email) links.push(el("a", { class: "btn primary", href: "mailto:" + S.email, text: S.email }));
+    if (S.github) links.push(el("a", { class: "btn", href: safeUrl(S.github), text: "GitHub" }));
+    if (S.linkedin) links.push(el("a", { class: "btn", href: safeUrl(S.linkedin), text: "LinkedIn" }));
+    return el("section", { id: "contact" }, [
+      el("h2", { text: "Contact" }),
+      el("p", { text: "The best way to reach me is by email." }),
+      el("div", { class: "actions" }, links)
+    ]);
+  }
+
+  function renderHome(anchor) {
+    clear(main);
+    document.title = (S.name || "Portfolio") + " | Portfolio";
+    main.appendChild(heroSection());
+    projectsSection().forEach(function (s) { main.appendChild(s); });
+    main.appendChild(experienceSection());
+    main.appendChild(skillsSection());
+    main.appendChild(contactSection());
+    if (anchor) {
+      var t = document.getElementById(anchor);
+      if (t && t.scrollIntoView) t.scrollIntoView();
+      else window.scrollTo(0, 0);
+    } else {
+      window.scrollTo(0, 0);
+    }
+  }
+
+  /* -------------------------------- skills page ------------------------------- */
+  function projectTitle(id) {
+    var t = null;
+    P.forEach(function (x) { if (x.id === id) t = x.title; });
+    return t;
+  }
+
+  function skillCard(sk) {
+    var proof = [];
+    (sk.projects || []).forEach(function (id) {
+      var t = projectTitle(id);
+      if (t) proof.push(el("a", { href: "#/p/" + encodeURIComponent(id), text: t }));
+    });
+    if (sk.link) proof.push(el("a", { href: safeUrl(sk.link.href), text: sk.link.label }));
+    return el("div", { class: "skillcard" }, [
+      el("h3", { text: sk.name }),
+      sk.note && el("p", { text: sk.note }),
+      proof.length ? el("div", { class: "proof" }, proof) : null
+    ]);
+  }
+
+  function renderSkills() {
+    clear(main);
+    window.scrollTo(0, 0);
+    document.title = "Skills | " + (S.name || "");
+    var page = el("div", { class: "skillspage" }, [
+      el("a", { class: "back", href: "#/", text: "< Home" }),
+      el("h1", { text: "Skills", style: "margin:8px 0 12px;font-size:clamp(1.8rem,4.5vw,2.6rem);letter-spacing:-0.02em" }),
+      el("p", { class: "lede", text: S.skillsIntro || "" })
+    ]);
+    (S.skillsDetail || []).forEach(function (g) {
+      var proven = g.skills.filter(function (k) { return k.note || (k.projects && k.projects.length) || k.link; });
+      var plain = g.skills.filter(function (k) { return !(k.note || (k.projects && k.projects.length) || k.link); });
+      var sec = el("section", { class: "skillgroup" }, [el("h2", { text: g.group })]);
+      if (proven.length) sec.appendChild(el("div", { class: "skilllist" }, proven.map(skillCard)));
+      if (plain.length) {
+        sec.appendChild(el("ul", { class: "tags", style: "list-style:none;padding:0;margin:0" },
+          plain.map(function (k) { return el("li", { class: "tag", text: k.name }); })));
+      }
+      page.appendChild(sec);
+    });
+    if (S.learning && S.learning.length) {
+      page.appendChild(el("section", { class: "skillgroup" }, [
+        el("h2", { text: "Currently learning" }),
+        el("ul", { class: "tags", style: "list-style:none;padding:0;margin:0" },
+          S.learning.map(function (k) { return el("li", { class: "tag", text: k }); }))
+      ]));
+    }
+    main.appendChild(page);
+  }
+
+  /* ------------------------------- project page ------------------------------ */
+  function renderProject(id) {
+    var p = null;
+    P.forEach(function (x) { if (x.id === id) p = x; });
+    clear(main);
+    window.scrollTo(0, 0);
+    if (!p) {
+      document.title = "Not found | " + (S.name || "");
+      main.appendChild(el("a", { class: "back", href: "#/projects", text: "< All projects" }));
+      main.appendChild(el("h1", { text: "Project not found" }));
+      return;
+    }
+    document.title = p.title + " | " + (S.name || "");
+
+    var facts = [];
+    function fact(label, value) { if (value) facts.push(el("div", { class: "fact" }, [el("b", { text: label }), el("span", { text: value })])); }
+    fact("Status", p.status);
+    fact("When", p.dates);
+    fact("Role", p.role);
+    fact("Team", p.team);
+    if (p.tools && p.tools.length) fact("Tools", p.tools.join(", "));
+
+    var prose = el("div", { class: "prose" });
+    (p.sections || []).forEach(function (s) {
+      prose.appendChild(el("h2", { text: s.heading }));
+      (s.body || []).forEach(function (para) { prose.appendChild(el("p", { text: para })); });
+    });
+    if (p.gallery && p.gallery.length) {
+      prose.appendChild(el("div", { class: "gallery" }, p.gallery.map(function (g) {
+        return el("figure", {}, [
+          el("img", { src: safeUrl(g.src), alt: g.alt || "", loading: "lazy" }),
+          g.caption && el("figcaption", { text: g.caption })
+        ]);
+      })));
+    }
+    if (p.results && p.results.length) {
+      prose.appendChild(el("h2", { text: "Results" }));
+      prose.appendChild(el("ul", {}, p.results.map(function (r) { return el("li", { text: r }); })));
+    }
+    if (p.links && p.links.length) {
+      prose.appendChild(el("h2", { text: "Links" }));
+      prose.appendChild(el("div", { class: "actions" }, p.links.map(function (l) {
+        return el("a", { class: "btn", href: safeUrl(l.url), text: l.label });
+      })));
+    }
+
+    var todo = null;
+    if (PREVIEW && p.needs && p.needs.length) {
+      todo = el("div", { class: "todo" }, [
+        el("b", { text: "STILL TO ADD (only visible with ?preview)" }),
+        el("ul", {}, p.needs.map(function (n) { return el("li", { text: n }); }))
+      ]);
+    }
+
+    main.appendChild(el("article", { class: "proj" }, [
+      el("a", { class: "back", href: "#/projects", text: "< All projects" }),
+      el("div", { class: "meta" }, [p.kind && el("span", { text: p.kind })]),
+      el("h1", { text: p.title }),
+      el("p", { class: "lede", text: p.summary || "" }),
+      p.image ? mediaFor(p) : null,
+      el("div", { class: "facts" }, facts),
+      tagRow(p.tags),
+      todo,
+      prose
+    ]));
+  }
+
+  /* --------------------------------- routing --------------------------------- */
+  function route() {
+    var h = window.location.hash || "#/";
+    var m = h.match(/^#\/p\/(.+)$/);
+    if (m) return renderProject(decodeURIComponent(m[1]));
+    if (h === "#/skills") return renderSkills();
+    var anchors = { "#/projects": "projects", "#/experience": "experience", "#/contact": "contact" };
+    renderHome(anchors[h] || null);
+    main.focus({ preventScroll: true });
+  }
+
+  renderChrome();
+  window.addEventListener("hashchange", route);
+  route();
+})();
+
+</script>
+</body>
+</html>
