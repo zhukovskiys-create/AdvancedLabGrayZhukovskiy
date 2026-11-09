@@ -6,8 +6,10 @@ from statistics import mean
 import serial
 import numpy as np
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                               QHBoxLayout, QLabel, QSlider, QSpinBox,
-                               QRadioButton, QButtonGroup, QGroupBox, QCheckBox)
+                               QHBoxLayout, QGridLayout, QLabel, QSlider, QSpinBox,
+                               QRadioButton, QButtonGroup, QGroupBox, QCheckBox,
+                               QDoubleSpinBox, QTabWidget)
+                               QDoubleSpinBox, QTabWidget)
 from PySide6.QtCore import Qt, QTimer
 import pyqtgraph as pg
 
@@ -23,7 +25,7 @@ TEMP_MAX = 45.0              # Max plot temp (°C)
 CSV_FILENAME = 'temperature_control_log.csv'
 
 LINE_PATTERN = re.compile(
-    r"^Temperature \(C\):\s*([0-9\.-]+),\s*Time \(s\):\s*([0-9\.-]+),\s*PWM:\s*([0-9]+),\s*Heat/Cool:\s*([01])$"
+    r"^Temperature \(C\):\s*([0-9\.-]+),\s*Time \(s\):\s*([0-9\.-]+),\s*PWM:\s*([0-9]+),\s*Heat/Cool:\s*([01])(?:,\s*Safety:.*)?$"
 )
 
 STEADY_PERCENTAGES = [0, 25, 50, 75, 100]
@@ -42,6 +44,14 @@ AUTO_SWEEP_SEQUENCE = [
     ('HEAT', 75), ('COOL', 75),
     ('HEAT', 100), ('COOL', 100),
 ]
+
+
+def calculate_p_control(temp_c, setpoint_c, kp):
+    error = setpoint_c - temp_c
+    signed_pwm = kp * error
+    direction = 'HEAT' if signed_pwm >= 0 else 'COOL'
+    pwm = int(max(0, min(255, round(abs(signed_pwm)))))
+    return error, direction, pwm
 
 
 def wait_for_steady_state(ser, direction, target_percent):
@@ -232,14 +242,17 @@ def run_steady_state_scan():
 class TECControlGUI(QMainWindow):
     def __init__(self, auto_run=False):
         super().__init__()
-        self.setWindowTitle("TEC Manual Control Interface")
-        self.resize(950, 750)
+        self.setWindowTitle("TEC Temperature Control")
+        self.resize(1100, 850)
 
         # Plot Data Arrays
         self.time_data = []
         self.temp_data = []
         self.pwm_heat_data = []
         self.pwm_cool_data = []
+        self.direction_data = []
+        self.setpoint_data = []
+        self.error_data = []
 
         # CSV Logging Setup
         self.csv_file = open(CSV_FILENAME, 'a', newline='')
@@ -270,7 +283,20 @@ class TECControlGUI(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         # --- Section 1: Control Panel ---
-        ctrl_layout = QHBoxLayout()
+        ctrl_layout = QGridLayout()
+
+        # Control mode selector
+        mode_box = QGroupBox("Control Mode")
+        mode_inner = QHBoxLayout()
+        self.radio_manual = QRadioButton("Manual")
+        self.radio_p_only = QRadioButton("P-only")
+        self.radio_manual.setChecked(True)
+        self.control_mode_group = QButtonGroup()
+        self.control_mode_group.addButton(self.radio_manual)
+        self.control_mode_group.addButton(self.radio_p_only)
+        mode_inner.addWidget(self.radio_manual)
+        mode_inner.addWidget(self.radio_p_only)
+        mode_box.setLayout(mode_inner)
 
         # Direction Switch (Radio Buttons)
         dir_box = QGroupBox("Direction")
@@ -313,6 +339,25 @@ class TECControlGUI(QMainWindow):
         pwm_inner.addWidget(self.pwm_spin)
         pwm_box.setLayout(pwm_inner)
 
+        # P-only controller parameters
+        p_box = QGroupBox("P Controller")
+        p_inner = QVBoxLayout()
+        self.setpoint_spin = QDoubleSpinBox()
+        self.setpoint_spin.setRange(-50.0, 150.0)
+        self.setpoint_spin.setDecimals(1)
+        self.setpoint_spin.setValue(25.0)
+        self.setpoint_spin.setSuffix(" °C")
+        self.kp_spin = QDoubleSpinBox()
+        self.kp_spin.setRange(0.0, 100.0)
+        self.kp_spin.setDecimals(2)
+        self.kp_spin.setValue(10.0)
+        self.kp_spin.setSuffix(" PWM/°C")
+        p_inner.addWidget(QLabel("Setpoint"))
+        p_inner.addWidget(self.setpoint_spin)
+        p_inner.addWidget(QLabel("Kp"))
+        p_inner.addWidget(self.kp_spin)
+        p_box.setLayout(p_inner)
+
         # Live Display Labels
         disp_box = QGroupBox("Live Status")
         disp_inner = QVBoxLayout()
@@ -320,30 +365,41 @@ class TECControlGUI(QMainWindow):
         self.lbl_temp = QLabel("Temp: -- °C")
         self.lbl_pwm = QLabel("PWM: 0")
         self.lbl_dir = QLabel("Dir: HEAT")
+        self.lbl_error = QLabel("Error: -- °C")
         disp_inner.addWidget(self.lbl_time)
         disp_inner.addWidget(self.lbl_temp)
         disp_inner.addWidget(self.lbl_pwm)
         disp_inner.addWidget(self.lbl_dir)
+        disp_inner.addWidget(self.lbl_error)
         disp_box.setLayout(disp_inner)
 
-        ctrl_layout.addWidget(dir_box)
-        ctrl_layout.addWidget(safety_box)
-        ctrl_layout.addWidget(pwm_box)
-        ctrl_layout.addWidget(disp_box)
+        ctrl_layout.addWidget(mode_box, 0, 0)
+        ctrl_layout.addWidget(dir_box, 0, 1)
+        ctrl_layout.addWidget(safety_box, 0, 2)
+        ctrl_layout.addWidget(pwm_box, 1, 0)
+        ctrl_layout.addWidget(p_box, 1, 1)
+        ctrl_layout.addWidget(disp_box, 1, 2)
         main_layout.addLayout(ctrl_layout)
 
         self.last_temp_c = None
         self.last_pwm_value = 0
+        self.radio_p_only.toggled.connect(self._on_control_mode_changed)
+        self.setpoint_spin.valueChanged.connect(self._on_p_parameter_changed)
+        self.kp_spin.valueChanged.connect(self._on_p_parameter_changed)
+        self._on_control_mode_changed()
 
         # --- Section 2: Charts ---
-        # Temperature Strip Chart
+        self.chart_tabs = QTabWidget()
+
+        # Temperature and setpoint strip chart
         self.temp_plot = pg.PlotWidget(title="Temperature vs. Arduino Time")
         self.temp_plot.setLabel('left', "Temperature", units="°C")
         self.temp_plot.setLabel('bottom', "Time", units="s")
         self.temp_plot.setYRange(TEMP_MIN, TEMP_MAX)
         self.temp_plot.showGrid(x=True, y=True)
         self.temp_curve = self.temp_plot.plot(pen=pg.mkPen('b', width=2))
-        main_layout.addWidget(self.temp_plot)
+        self.setpoint_curve = self.temp_plot.plot(pen=pg.mkPen('g', width=2, style=Qt.DashLine))
+        self.chart_tabs.addTab(self.temp_plot, "Temperature")
 
         # PWM Strip Chart (Red = Heating, Blue = Cooling)
         self.pwm_plot = pg.PlotWidget(title="PWM Output vs. Arduino Time")
@@ -354,7 +410,24 @@ class TECControlGUI(QMainWindow):
 
         self.pwm_heat_curve = self.pwm_plot.plot(pen=pg.mkPen('r', width=2.5), connect='finite')
         self.pwm_cool_curve = self.pwm_plot.plot(pen=pg.mkPen('b', width=2.5), connect='finite')
-        main_layout.addWidget(self.pwm_plot)
+        self.chart_tabs.addTab(self.pwm_plot, "PWM")
+
+        self.direction_plot = pg.PlotWidget(title="Direction vs. Arduino Time")
+        self.direction_plot.setLabel('left', "Direction")
+        self.direction_plot.setLabel('bottom', "Time", units="s")
+        self.direction_plot.setYRange(-0.2, 1.2)
+        self.direction_plot.getAxis('left').setTicks([[(0, 'COOL'), (1, 'HEAT')]])
+        self.direction_plot.showGrid(x=True, y=True)
+        self.direction_curve = self.direction_plot.plot(pen=pg.mkPen('k', width=2), symbol='o', symbolSize=4)
+        self.chart_tabs.addTab(self.direction_plot, "Direction")
+
+        self.error_plot = pg.PlotWidget(title="Setpoint Error vs. Arduino Time")
+        self.error_plot.setLabel('left', "Error", units="°C")
+        self.error_plot.setLabel('bottom', "Time", units="s")
+        self.error_plot.showGrid(x=True, y=True)
+        self.error_curve = self.error_plot.plot(pen=pg.mkPen('m', width=2))
+        self.chart_tabs.addTab(self.error_plot, "Error")
+        main_layout.addWidget(self.chart_tabs, 1)
 
         # Serial check timer
         self.timer = QTimer()
@@ -372,10 +445,35 @@ class TECControlGUI(QMainWindow):
         if auto_run:
             self.start_auto_sweep()
 
+    def _on_control_mode_changed(self):
+        p_only = self.radio_p_only.isChecked()
+        self.pwm_slider.setEnabled(not p_only)
+        self.pwm_spin.setEnabled(not p_only)
+        self.radio_heat.setEnabled(not p_only)
+        self.radio_cool.setEnabled(not p_only)
+        self.setpoint_spin.setEnabled(p_only)
+        self.kp_spin.setEnabled(p_only)
+        self.send_command()
+
+    def _on_p_parameter_changed(self):
+        if self.radio_p_only.isChecked():
+            self.send_command()
+
     def send_command(self):
-        """Formats and sends serial commands whenever GUI controls change."""
-        pwm_val = self.pwm_slider.value()
-        direction = "HEAT" if self.radio_heat.isChecked() else "COOL"
+        """Send manual or P-controller PWM and direction to the Arduino."""
+        if self.radio_p_only.isChecked():
+            if self.last_temp_c is None:
+                pwm_val, direction = 0, "HEAT"
+            else:
+                error, direction, pwm_val = calculate_p_control(
+                    self.last_temp_c,
+                    self.setpoint_spin.value(),
+                    self.kp_spin.value(),
+                )
+                self.lbl_error.setText(f"Error: {error:.2f} °C")
+        else:
+            pwm_val = self.pwm_slider.value()
+            direction = "HEAT" if self.radio_heat.isChecked() else "COOL"
 
         if not self.shutdown_latched:
             self.saved_pwm_value = pwm_val
@@ -412,6 +510,9 @@ class TECControlGUI(QMainWindow):
             self.last_temp_c = temp_c
             self.last_pwm_value = pwm
 
+            error = self.setpoint_spin.value() - temp_c
+            self.lbl_error.setText(f"Error: {error:.2f} °C")
+
             if self.auto_shutdown.isChecked():
                 if temp_c >= self.SHUTDOWN_TEMP_C:
                     if not self.shutdown_latched:
@@ -425,6 +526,9 @@ class TECControlGUI(QMainWindow):
                     self.pwm_slider.setValue(restore_value)
                     print(f"Temperature dropped below {self.RECOVERY_TEMP_C}°C; PWM restored to {restore_value}.")
 
+            if self.radio_p_only.isChecked():
+                self.send_command()
+
             # Print exact formatted line to terminal
             print(f"Temperature (C): {temp_c:.2f}, Time (s): {time_s:.2f}, PWM: {pwm}, Heat/Cool: {heat_cool}")
 
@@ -436,14 +540,12 @@ class TECControlGUI(QMainWindow):
             self.lbl_time.setText(f"Time: {time_s:.2f} s")
             self.lbl_temp.setText(f"Temp: {temp_c:.2f} °C")
 
-            # Ignore stale startup samples that belong to a previous run.
-            if not self.time_data and time_s > 60.0:
-                print(f"Ignoring stale startup sample: time={time_s:.2f}s, pwm={pwm}, heat_cool={heat_cool}")
-                continue
-
             # Store Plot Data
             self.time_data.append(time_s)
             self.temp_data.append(temp_c)
+            self.setpoint_data.append(self.setpoint_spin.value())
+            self.error_data.append(error)
+            self.direction_data.append(heat_cool)
 
             # Split by direction so the graph shows red for heating and blue for cooling.
             if heat_cool == 1:
@@ -458,16 +560,24 @@ class TECControlGUI(QMainWindow):
             while self.time_data and self.time_data[0] < cutoff:
                 self.time_data.pop(0)
                 self.temp_data.pop(0)
+                self.setpoint_data.pop(0)
+                self.error_data.pop(0)
+                self.direction_data.pop(0)
                 self.pwm_heat_data.pop(0)
                 self.pwm_cool_data.pop(0)
 
             # Redraw Plots
             self.temp_curve.setData(self.time_data, self.temp_data)
+            self.setpoint_curve.setData(self.time_data, self.setpoint_data)
             self.pwm_heat_curve.setData(self.time_data, self.pwm_heat_data)
             self.pwm_cool_curve.setData(self.time_data, self.pwm_cool_data)
+            self.direction_curve.setData(self.time_data, self.direction_data)
+            self.error_curve.setData(self.time_data, self.error_data)
 
             self.temp_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
             self.pwm_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
+            self.direction_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
+            self.error_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
 
     def start_auto_sweep(self):
         """Run the full steady-state sweep automatically while keeping the live chart visible."""

@@ -588,8 +588,8 @@ class ModelingTECGui:
         self.live_symbol_cache: dict[str, tk.PhotoImage] = {}
         self.root = root
         self.root.title("Module 6: TEC Control Models")
-        self.root.geometry("1540x940")
-        self.root.minsize(1260, 800)
+        self.root.geometry("880x1100+20+20")
+        self.root.minsize(820, 800)
 
         self.defaults = ModelConfig()
         self.config = self.defaults
@@ -616,7 +616,7 @@ class ModelingTECGui:
         self.live_p_prediction = tk.StringVar()
         self.live_damping = tk.StringVar()
         self.live_status = tk.StringVar()
-        self.run_button_text = tk.StringVar(value="Resume")
+        self.run_button_text = tk.StringVar(value="Start")
 
         self._build_layout()
         self._reset_experiment()
@@ -626,15 +626,23 @@ class ModelingTECGui:
         self._schedule_next_tick()
 
     def _build_layout(self) -> None:
-        outer = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
-        outer.pack(fill=tk.BOTH, expand=True)
-        controls = ttk.Frame(outer, padding=10)
-        plots = ttk.Frame(outer, padding=(4, 8, 8, 8))
-        # Reserve enough horizontal space for both the sliders and their
-        # exact-value entry boxes.  A zero-weight control pane collapses the
-        # sliders to zero width on macOS when the plot requests extra space.
-        outer.add(controls, weight=2)
-        outer.add(plots, weight=3)
+        controls = ttk.Frame(self.root, padding=10)
+        controls.pack(fill=tk.BOTH, expand=True)
+
+        self.plot_window = tk.Toplevel(self.root)
+        self.plot_window.title("Module 6: TEC Control Plots")
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        plot_width = max(700, min(980, screen_width - 40))
+        plot_height = max(600, min(850, screen_height - 60))
+        plot_x = max(0, screen_width - plot_width - 20)
+        self.plot_window.geometry(
+            f"{plot_width}x{plot_height}+{plot_x}+20"
+        )
+        self.plot_window.minsize(700, 600)
+        self.plot_window.protocol("WM_DELETE_WINDOW", self._hide_plots)
+        plots = ttk.Frame(self.plot_window, padding=8)
+        plots.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(
             controls,
@@ -690,6 +698,22 @@ class ModelingTECGui:
         parameter_box.bind("<<ComboboxSelected>>", self._change_parameter_source)
         row += 1
 
+        buttons = ttk.Frame(controls)
+        buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(2, 5))
+        ttk.Button(
+            buttons, textvariable=self.run_button_text, command=self._toggle_running
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(buttons, text="Zero integral", command=self._zero_integral).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
+        )
+        ttk.Button(buttons, text="Reset experiment", command=self._reset_experiment).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
+        )
+        ttk.Button(buttons, text="Show plots", command=self._show_plots).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
+        )
+        row += 1
+
         for symbol, label, attribute, units, low, high, resolution in self.FIELD_SPECS:
             variable = tk.DoubleVar(value=getattr(self.defaults, attribute))
             self.entries[attribute] = variable
@@ -736,19 +760,6 @@ class ModelingTECGui:
         ttk.Checkbutton(
             controls, text="Prevent integral windup", variable=self.anti_windup
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(5, 5))
-        row += 1
-
-        buttons = ttk.Frame(controls)
-        buttons.grid(row=row, column=0, columnspan=3, sticky="ew")
-        ttk.Button(
-            buttons, textvariable=self.run_button_text, command=self._toggle_running
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(buttons, text="Zero integral", command=self._zero_integral).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
-        )
-        ttk.Button(buttons, text="Reset experiment", command=self._reset_experiment).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
-        )
         row += 1
 
         ttk.Separator(controls).grid(
@@ -865,7 +876,8 @@ class ModelingTECGui:
         toolbar.update()
         toolbar.pack(fill=tk.X)
         self.root.update_idletasks()
-        outer.sashpos(0, 700)
+        self.plot_window.update_idletasks()
+        self.plot_window.lift()
 
     def _render_math_symbol(self, expression: str) -> tk.PhotoImage:
         """Render a control symbol with the same math engine as the plots."""
@@ -964,7 +976,7 @@ class ModelingTECGui:
         self.errors = [target_temperature - self.config.initial_c]
         self.latest = self._current_result()
         self.running = False
-        self.run_button_text.set("Resume")
+        self.run_button_text.set("Start")
         self._draw()
 
     def _current_result(self) -> StepResult:
@@ -1028,6 +1040,13 @@ class ModelingTECGui:
         self.latest = self._current_result()
         self._draw()
         return "break"
+
+    def _show_plots(self) -> None:
+        self.plot_window.deiconify()
+        self.plot_window.lift()
+
+    def _hide_plots(self) -> None:
+        self.plot_window.withdraw()
 
     def _toggle_running(self) -> None:
         if self.running:

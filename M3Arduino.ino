@@ -14,7 +14,7 @@ const float R_FIXED = 100000.0;      // Fixed resistor (100k)
 const float R0 = 100000.0;           // Thermistor resistance at 25°C (100k)
 const float T0_KELVIN = 298.15;      // Reference temperature in Kelvin
 const float BETA = 3950.0;           // Beta coefficient
-const int SAMPLE_COUNT = 500;        // ADC samples to average per reading (100-1000)
+const int SAMPLE_COUNT = 1000;       // ADC samples to average per reading
 const int REPORT_INTERVAL = 1000;    // Serial report interval in milliseconds
 const float SOFTWARE_TEMP_LIMIT_C = 60.0; // Software shutdown limit for TEC output. Hardware thermal switch at ~70 C remains the independent final protection.
 
