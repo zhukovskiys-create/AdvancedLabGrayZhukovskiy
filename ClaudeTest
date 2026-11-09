@@ -40,8 +40,8 @@ The GUI can run the mathematical model or connect to the Module 7 Arduino
 controller over a 9600-baud serial connection. For hardware control, select
 "Arduino hardware", choose the board's serial port, connect, then resume.
 Start connected and paused with ``python ClaudeTest --hardware --port COM3``.
-Hardware feedforward and offset-sine modes use the model-line susceptibility
-by default; a measured steady-state CSV can optionally replace it.
+Hardware feedforward and offset-sine modes require a measured susceptibility
+CSV loaded with "Load CSV...".
 """
 
 from __future__ import annotations
