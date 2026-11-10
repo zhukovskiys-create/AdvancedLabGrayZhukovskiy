@@ -1,0 +1,656 @@
+import sys
+import re
+import csv
+import time
+import math
+import serial
+import numpy as np
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                               QHBoxLayout, QGridLayout, QLabel, QSlider, QSpinBox,
+                               QRadioButton, QButtonGroup, QGroupBox, QCheckBox)
+from PySide6.QtCore import Qt, QTimer
+import pyqtgraph as pg
+
+# =============================================================================
+# USER CONFIGURATION PARAMETERS
+# =============================================================================
+SERIAL_PORT = 'COM3'         # Serial port name
+BAUD_RATE = 9600             # Baud rate
+NUM_SENSORS = 6              # Thermistors on A0..A5 (Arduino prints T0..T5)
+SENSOR_NAMES = [f"T{i}" for i in range(NUM_SENSORS)]
+WINDOW_DURATION = 120.0      # Plot rolling window (seconds); wider since data arrives every 5 s
+UPDATE_INTERVAL_MS = 50      # Loop check interval (ms)
+TEMP_MIN = 15.0              # Min plot temp (°C)
+TEMP_MAX = 45.0              # Max plot temp (°C)
+CSV_FILENAME = 'temperature_control_log_6ch.csv'   # new name: the column layout changed
+
+# Arduino now prints one line every 5 s, e.g.
+#   T0: 27.73, T1: 27.50, T2: 27.61, T3: 27.80, T4: 27.42, T5: 27.55
+# It no longer sends time, PWM or Heat/Cool, so those come from this program:
+#   time = seconds since this program opened the serial port
+#   PWM / direction = the last command sent to the Arduino
+SENSOR_PATTERN = re.compile(r"T(\d+):\s*(-?[0-9]+\.?[0-9]*)")
+
+STEADY_PERCENTAGES = [0, 25, 50, 75, 100]
+DIRECTIONS = ["HEAT", "COOL"]
+STEADY_SLOPE_LIMIT_C_PER_S = 0.01
+STABLE_WINDOW_SECONDS = 20.0   # samples arrive every 5 s, so ~5 samples span 20 s
+WINDOW_TOLERANCE_SECONDS = 1.0 # allows for timing jitter between samples
+MIN_STEADY_SAMPLES = 4
+MAX_STEADY_SECONDS = 120.0
+CSV_STEADY_FILENAME = 'steady_state_temperature_scan.csv'
+SUMMARY_FILENAME = 'steady_state_summary.csv'
+AUTO_SWEEP_SECONDS = 30.0
+AUTO_SWEEP_SEQUENCE = [
+    ('HEAT', 0), ('COOL', 0),
+    ('HEAT', 25), ('COOL', 25),
+    ('HEAT', 50), ('COOL', 50),
+    ('HEAT', 75), ('COOL', 75),
+    ('HEAT', 100), ('COOL', 100),
+]
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+def parse_temperature_line(line):
+    """Parse 'T0: x, T1: y, ... T5: z' into a list of NUM_SENSORS floats.
+
+    Returns None if the line is not a complete reading. The Arduino reports
+    exactly 0.00 when a channel has a voltage error, so 0.0 is mapped to NaN.
+    """
+    if not line.startswith("T0:"):
+        return None
+    found = SENSOR_PATTERN.findall(line)
+    if len(found) != NUM_SENSORS:
+        return None
+
+    temps = [math.nan] * NUM_SENSORS
+    for idx_str, val_str in found:
+        idx = int(idx_str)
+        if idx >= NUM_SENSORS:
+            return None
+        val = float(val_str)
+        temps[idx] = math.nan if val == 0.0 else val
+    return temps
+
+
+def valid_mean(values):
+    """Mean of the non-NaN values, or NaN if there are none."""
+    good = [v for v in values if not math.isnan(v)]
+    return sum(good) / len(good) if good else math.nan
+
+
+def valid_max(values):
+    good = [v for v in values if not math.isnan(v)]
+    return max(good) if good else math.nan
+
+
+def per_sensor_mean(sample_list):
+    """Per-sensor NaN-aware mean over a list of samples (each with a 'temps' list)."""
+    return [valid_mean([s['temps'][i] for s in sample_list]) for i in range(NUM_SENSORS)]
+
+
+def fmt(value):
+    return '' if (isinstance(value, float) and math.isnan(value)) else value
+
+
+def find_steady_window(samples):
+    """Return the trailing window of samples if it spans the stability window, else None."""
+    if not samples:
+        return None
+    last_t = samples[-1]['time_s']
+    window = [s for s in samples
+              if last_t - s['time_s'] <= STABLE_WINDOW_SECONDS + WINDOW_TOLERANCE_SECONDS]
+    if len(window) < MIN_STEADY_SAMPLES:
+        return None
+    if window[-1]['time_s'] - window[0]['time_s'] < STABLE_WINDOW_SECONDS - WINDOW_TOLERANCE_SECONDS:
+        return None
+    return window
+
+
+def build_result(direction, percent, requested_pwm, samples, start_temps, window):
+    """Assemble a result dict from the samples in `window` (or all-NaN if none)."""
+    if not window:
+        return {
+            'direction': direction,
+            'requested_percent': percent,
+            'requested_pwm': requested_pwm,
+            'actual_pwm': requested_pwm,
+            'start_temp_c': math.nan,
+            'steady_temp_c': math.nan,
+            'steady_temps': [math.nan] * NUM_SENSORS,
+            'time_s': math.nan,
+            'wait_time_s': 0.0,
+        }
+    steady_temps = per_sensor_mean(window)
+    return {
+        'direction': direction,
+        'requested_percent': percent,
+        'requested_pwm': requested_pwm,
+        'actual_pwm': requested_pwm,   # Arduino no longer echoes PWM; this is the commanded value
+        'start_temp_c': valid_mean(start_temps) if start_temps else math.nan,
+        'steady_temp_c': valid_mean(steady_temps),
+        'steady_temps': steady_temps,
+        'time_s': window[-1]['time_s'],
+        'wait_time_s': max(window[-1]['time_s'] - samples[0]['time_s'], 0.0),
+    }
+
+
+# =============================================================================
+# Steady-state scan (command-line mode)
+# =============================================================================
+def wait_for_steady_state(ser, direction, target_percent):
+    """Send a constant command and return the steady-state temperatures for that setting.
+
+    Steady state is judged on the average of all valid sensors; per-sensor
+    steady temperatures are recorded as well.
+    """
+    requested_pwm = int(round((target_percent / 100.0) * 255))
+    ser.write(f"SET PWM {requested_pwm} DIR {direction}\n".encode('utf-8'))
+    print(f"Requested {direction} at {target_percent}% -> PWM {requested_pwm}")
+
+    samples = []
+    start_time = time.monotonic()
+    last_log_time = start_time
+    start_temps = None
+
+    while time.monotonic() - start_time < MAX_STEADY_SECONDS:
+        while ser.in_waiting > 0:
+            try:
+                line = ser.readline().decode('utf-8', errors='ignore').strip()
+            except Exception:
+                continue
+
+            temps = parse_temperature_line(line)
+            if temps is None:
+                continue
+
+            if start_temps is None:
+                start_temps = temps
+            samples.append({
+                'time_s': time.monotonic() - start_time,
+                'temps': temps,
+                'avg_c': valid_mean(temps),
+            })
+
+        if time.monotonic() - last_log_time >= 2.0 and samples:
+            latest = samples[-1]
+            print(f"  t={latest['time_s']:.1f}s, avg temp={latest['avg_c']:.2f}C, commanded PWM={requested_pwm}")
+            last_log_time = time.monotonic()
+
+        window = find_steady_window(samples)
+        if window:
+            times = [s['time_s'] for s in window if not math.isnan(s['avg_c'])]
+            avgs = [s['avg_c'] for s in window if not math.isnan(s['avg_c'])]
+            if len(avgs) >= MIN_STEADY_SAMPLES:
+                slope = np.polyfit(times, avgs, 1)[0]
+                spread = max(avgs) - min(avgs)
+                if abs(slope) <= STEADY_SLOPE_LIMIT_C_PER_S and spread <= 0.25:
+                    result = build_result(direction, target_percent, requested_pwm, samples, start_temps, window)
+                    print(f"Steady state reached: {result['steady_temp_c']:.2f}C (avg of sensors) at PWM {requested_pwm}.")
+                    return result
+
+        time.sleep(0.2)
+
+    if samples:
+        window = samples[-MIN_STEADY_SAMPLES:]
+        result = build_result(direction, target_percent, requested_pwm, samples, start_temps, window)
+        print(f"Timed out; using last {len(window)} samples, mean {result['steady_temp_c']:.2f}C at PWM {requested_pwm}.")
+        return result
+
+    return build_result(direction, target_percent, requested_pwm, samples, start_temps, None)
+
+
+def save_summary_csv(results):
+    """Write a lab-table style CSV summary (temperatures are the average of all valid sensors)."""
+    rows = []
+    for direction in DIRECTIONS:
+        for percent in STEADY_PERCENTAGES:
+            match = next((row for row in results
+                          if row['direction'] == direction and row['requested_percent'] == percent), None)
+            if match is None:
+                continue
+            rows.append({
+                'Direction': direction,
+                'PWM': match['actual_pwm'],
+                'Start Temperature (°C)': fmt(match.get('start_temp_c', '')),
+                'Steady Temperature (°C)': fmt(match.get('steady_temp_c', '')),
+                'Time Waited (s)': match.get('wait_time_s', 0.0),
+                'Notes': '',
+            })
+
+    with open(SUMMARY_FILENAME, 'w', newline='') as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=['Direction', 'PWM', 'Start Temperature (°C)',
+                                                      'Steady Temperature (°C)', 'Time Waited (s)', 'Notes'])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Saved summary table to {SUMMARY_FILENAME}")
+    return rows
+
+
+def _to_float(value, default=math.nan):
+    return float(value) if value not in ('', None) else default
+
+
+def summarize_existing_csv(path=CSV_STEADY_FILENAME):
+    """Read the saved scan CSV and generate the lab-sheet summary table from it."""
+    results = []
+    with open(path, newline='') as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            results.append({
+                'direction': row['direction'],
+                'requested_percent': int(float(row['requested_percent'])),
+                'requested_pwm': int(float(row['requested_pwm'])),
+                'actual_pwm': int(float(row['actual_pwm'])),
+                'start_temp_c': _to_float(row.get('start_temp_c')),
+                'steady_temp_c': _to_float(row.get('steady_temp_c')),
+                'steady_temps': [_to_float(row.get(f'steady_{name}')) for name in SENSOR_NAMES],
+                'time_s': _to_float(row.get('time_s')),
+                'wait_time_s': _to_float(row.get('wait_time_s'), 0.0),
+            })
+    save_summary_csv(results)
+    return results
+
+
+def run_steady_state_scan():
+    """Run the requested 0,25,50,75,100% scan for heating and cooling and save the results."""
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.2)
+    time.sleep(2.0)
+    ser.reset_input_buffer()
+    ser.flush()
+    print(f'Connected to {SERIAL_PORT} at {BAUD_RATE} baud')
+
+    results = []
+    try:
+        for direction in DIRECTIONS:
+            for percent in STEADY_PERCENTAGES:
+                result = wait_for_steady_state(ser, direction, percent)
+                results.append(result)
+                print(result)
+                time.sleep(1.0)
+
+        with open(CSV_STEADY_FILENAME, 'w', newline='') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(['direction', 'requested_percent', 'requested_pwm', 'actual_pwm',
+                             'start_temp_c', 'steady_temp_c', 'time_s', 'wait_time_s']
+                            + [f'steady_{name}' for name in SENSOR_NAMES])
+            for row in results:
+                writer.writerow([
+                    row['direction'],
+                    row['requested_percent'],
+                    row['requested_pwm'],
+                    row['actual_pwm'],
+                    fmt(row.get('start_temp_c', '')),
+                    fmt(row.get('steady_temp_c', '')),
+                    fmt(row.get('time_s', '')),
+                    row.get('wait_time_s', 0.0),
+                ] + [fmt(t) for t in row['steady_temps']])
+
+        print(f"Saved steady-state scan to {CSV_STEADY_FILENAME}")
+        save_summary_csv(results)
+        return results
+    finally:
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+
+# =============================================================================
+# GUI
+# =============================================================================
+class TECControlGUI(QMainWindow):
+    def __init__(self, auto_run=False):
+        super().__init__()
+        self.setWindowTitle("TEC Manual Control Interface (6 thermistors)")
+        self.resize(1000, 800)
+
+        # Plot Data Arrays
+        self.time_data = []
+        self.temp_data = [[] for _ in range(NUM_SENSORS)]
+        self.pwm_heat_data = []
+        self.pwm_cool_data = []
+
+        # Last command sent (the Arduino no longer reports PWM / direction)
+        self.cmd_pwm = 0
+        self.cmd_dir = "HEAT"
+
+        # Most recent readings
+        self.last_temps = None
+        self.last_avg_c = None
+
+        # CSV Logging Setup
+        self.csv_file = open(CSV_FILENAME, 'a', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        if self.csv_file.tell() == 0:
+            self.csv_writer.writerow(['time_s'] + [f'{n}_C' for n in SENSOR_NAMES] + ['pwm', 'heat_cool'])
+            self.csv_file.flush()
+
+        # Serial Setup
+        try:
+            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+            # Discard any buffered startup data from previous runs so the plot starts clean.
+            self.ser.reset_input_buffer()
+            self.ser.flush()
+        except Exception as e:
+            print(f"Serial Connection Error on {SERIAL_PORT}: {e}")
+            self.ser = None
+
+        # Time zero for plots/CSV (Arduino no longer sends a timestamp)
+        self.t_start = time.monotonic()
+
+        # Temperature safety thresholds (applied to the hottest valid sensor)
+        self.SHUTDOWN_TEMP_C = 60.0
+        self.RECOVERY_TEMP_C = 55.0
+        self.shutdown_latched = False
+        self.saved_pwm_value = 0
+
+        # Build GUI Layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # --- Section 1: Control Panel ---
+        ctrl_layout = QHBoxLayout()
+
+        # Direction Switch (Radio Buttons)
+        dir_box = QGroupBox("Direction")
+        dir_inner = QHBoxLayout()
+        self.radio_heat = QRadioButton("HEAT")
+        self.radio_cool = QRadioButton("COOL")
+        self.radio_heat.setChecked(True)
+        self.dir_group = QButtonGroup()
+        self.dir_group.addButton(self.radio_heat)
+        self.dir_group.addButton(self.radio_cool)
+        dir_inner.addWidget(self.radio_heat)
+        dir_inner.addWidget(self.radio_cool)
+        dir_box.setLayout(dir_inner)
+
+        # Safety cutoff switch
+        safety_box = QGroupBox("Safety")
+        safety_inner = QVBoxLayout()
+        self.auto_shutdown = QCheckBox("Cutoff at 60°C (any sensor)")
+        self.auto_shutdown.setChecked(True)
+        safety_inner.addWidget(self.auto_shutdown)
+        safety_box.setLayout(safety_inner)
+
+        # Synchronized PWM Slider and Clamped Text Box (0-255)
+        pwm_box = QGroupBox("PWM Output (0-255)")
+        pwm_inner = QHBoxLayout()
+        self.pwm_slider = QSlider(Qt.Horizontal)
+        self.pwm_slider.setRange(0, 255)
+        self.pwm_spin = QSpinBox()
+        self.pwm_spin.setRange(0, 255)
+
+        # Connect Slider and SpinBox to keep them synchronized
+        self.pwm_slider.valueChanged.connect(self.pwm_spin.setValue)
+        self.pwm_spin.valueChanged.connect(self.pwm_slider.setValue)
+
+        # Command sending signals
+        self.pwm_slider.valueChanged.connect(self.send_command)
+        self.radio_heat.toggled.connect(self.send_command)
+
+        pwm_inner.addWidget(self.pwm_slider)
+        pwm_inner.addWidget(self.pwm_spin)
+        pwm_box.setLayout(pwm_inner)
+
+        # Live Display Labels
+        disp_box = QGroupBox("Live Status")
+        disp_inner = QVBoxLayout()
+        self.lbl_time = QLabel("Time: 0.00 s")
+        self.lbl_pwm = QLabel("PWM: 0")
+        self.lbl_dir = QLabel("Dir: HEAT")
+        disp_inner.addWidget(self.lbl_time)
+        disp_inner.addWidget(self.lbl_pwm)
+        disp_inner.addWidget(self.lbl_dir)
+        disp_box.setLayout(disp_inner)
+
+        # Per-thermistor temperature readouts (2 rows x 3 columns)
+        temps_box = QGroupBox("Temperatures (°C)")
+        temps_grid = QGridLayout()
+        self.lbl_temps = []
+        for i, name in enumerate(SENSOR_NAMES):
+            label = QLabel(f"{name}: --")
+            self.lbl_temps.append(label)
+            temps_grid.addWidget(label, i // 3, i % 3)
+        temps_box.setLayout(temps_grid)
+
+        ctrl_layout.addWidget(dir_box)
+        ctrl_layout.addWidget(safety_box)
+        ctrl_layout.addWidget(pwm_box)
+        ctrl_layout.addWidget(disp_box)
+        ctrl_layout.addWidget(temps_box)
+        main_layout.addLayout(ctrl_layout)
+
+        # --- Section 2: Charts ---
+        # Temperature Strip Chart (one line per thermistor)
+        self.temp_plot = pg.PlotWidget(title="Temperature vs. Time")
+        self.temp_plot.setLabel('left', "Temperature", units="°C")
+        self.temp_plot.setLabel('bottom', "Time", units="s")
+        self.temp_plot.setYRange(TEMP_MIN, TEMP_MAX)
+        self.temp_plot.showGrid(x=True, y=True)
+        self.temp_plot.addLegend()
+        self.temp_curves = []
+        for i, name in enumerate(SENSOR_NAMES):
+            curve = self.temp_plot.plot(pen=pg.mkPen(pg.intColor(i, hues=NUM_SENSORS), width=2),
+                                        name=name, connect='finite')
+            self.temp_curves.append(curve)
+        main_layout.addWidget(self.temp_plot)
+
+        # PWM Strip Chart (Red = Heating, Blue = Cooling)
+        self.pwm_plot = pg.PlotWidget(title="PWM Output vs. Time")
+        self.pwm_plot.setLabel('left', "PWM Magnitude", units="0-255")
+        self.pwm_plot.setLabel('bottom', "Time", units="s")
+        self.pwm_plot.setYRange(0, 260)
+        self.pwm_plot.showGrid(x=True, y=True)
+
+        self.pwm_heat_curve = self.pwm_plot.plot(pen=pg.mkPen('r', width=2.5), connect='finite')
+        self.pwm_cool_curve = self.pwm_plot.plot(pen=pg.mkPen('b', width=2.5), connect='finite')
+        main_layout.addWidget(self.pwm_plot)
+
+        # Serial check timer
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.read_serial_data)
+        self.timer.start(UPDATE_INTERVAL_MS)
+
+        # Automatic sweep state
+        self.auto_sweep_sequence = list(AUTO_SWEEP_SEQUENCE)
+        self.auto_sweep_index = 0
+        self.auto_sweep_timer = None
+        self.auto_sweep_results = []
+        self.auto_sweep_step_start = None
+
+        if auto_run:
+            self.start_auto_sweep()
+
+    def send_command(self):
+        """Formats and sends serial commands whenever GUI controls change."""
+        pwm_val = self.pwm_slider.value()
+        direction = "HEAT" if self.radio_heat.isChecked() else "COOL"
+
+        if not self.shutdown_latched:
+            self.saved_pwm_value = pwm_val
+
+        if self.auto_shutdown.isChecked() and self.shutdown_latched:
+            pwm_val = 0
+
+        self.cmd_pwm = pwm_val
+        self.cmd_dir = direction
+
+        self.lbl_pwm.setText(f"PWM: {pwm_val}")
+        self.lbl_dir.setText(f"Dir: {direction}")
+
+        command_str = f"SET PWM {pwm_val} DIR {direction}\n"
+        if self.ser and self.ser.is_open:
+            self.ser.write(command_str.encode('utf-8'))
+
+    def read_serial_data(self):
+        """Parses incoming temperature lines, logs CSV, and updates displays/plots."""
+        if not self.ser or not self.ser.is_open:
+            return
+
+        while self.ser.in_waiting > 0:
+            try:
+                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            except Exception:
+                continue
+
+            temps = parse_temperature_line(line)
+            if temps is None:
+                continue
+
+            time_s = time.monotonic() - self.t_start
+            pwm = self.cmd_pwm
+            heat_cool = 1 if self.cmd_dir == "HEAT" else 0
+            self.last_temps = temps
+            self.last_avg_c = valid_mean(temps)
+
+            # Safety cutoff on the hottest valid sensor
+            hottest = valid_max(temps)
+            if self.auto_shutdown.isChecked() and not math.isnan(hottest):
+                if hottest >= self.SHUTDOWN_TEMP_C:
+                    if not self.shutdown_latched:
+                        self.shutdown_latched = True
+                        self.saved_pwm_value = self.pwm_slider.value()
+                        print(f"A sensor reached {self.SHUTDOWN_TEMP_C}°C; PWM locked to 0 until all sensors drop below {self.RECOVERY_TEMP_C}°C.")
+                    self.pwm_slider.setValue(0)
+                elif hottest <= self.RECOVERY_TEMP_C and self.shutdown_latched:
+                    self.shutdown_latched = False
+                    restore_value = self.saved_pwm_value
+                    self.pwm_slider.setValue(restore_value)
+                    print(f"Temperature dropped below {self.RECOVERY_TEMP_C}°C; PWM restored to {restore_value}.")
+
+            # Print the reading to the terminal
+            temp_str = ", ".join(f"{n}: {t:.2f}" for n, t in zip(SENSOR_NAMES, temps))
+            print(f"{temp_str} | Time (s): {time_s:.2f}, PWM: {pwm}, Heat/Cool: {heat_cool}")
+
+            # Update CSV
+            self.csv_writer.writerow([f"{time_s:.2f}"] + [fmt(t) for t in temps] + [pwm, heat_cool])
+            self.csv_file.flush()
+
+            # Update Live Status Labels
+            self.lbl_time.setText(f"Time: {time_s:.2f} s")
+            for label, name, t in zip(self.lbl_temps, SENSOR_NAMES, temps):
+                label.setText(f"{name}: {t:.2f}" if not math.isnan(t) else f"{name}: ERR")
+
+            # Store Plot Data
+            self.time_data.append(time_s)
+            for i in range(NUM_SENSORS):
+                self.temp_data[i].append(temps[i])
+
+            # Split by direction so the graph shows red for heating and blue for cooling.
+            if heat_cool == 1:
+                self.pwm_heat_data.append(pwm)
+                self.pwm_cool_data.append(np.nan)
+            else:
+                self.pwm_heat_data.append(np.nan)
+                self.pwm_cool_data.append(pwm)
+
+            # Apply rolling window
+            cutoff = time_s - WINDOW_DURATION
+            while self.time_data and self.time_data[0] < cutoff:
+                self.time_data.pop(0)
+                for series in self.temp_data:
+                    series.pop(0)
+                self.pwm_heat_data.pop(0)
+                self.pwm_cool_data.pop(0)
+
+            # Redraw Plots
+            for curve, series in zip(self.temp_curves, self.temp_data):
+                curve.setData(self.time_data, series)
+            self.pwm_heat_curve.setData(self.time_data, self.pwm_heat_data)
+            self.pwm_cool_curve.setData(self.time_data, self.pwm_cool_data)
+
+            self.temp_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
+            self.pwm_plot.setXRange(max(0.0, cutoff), max(WINDOW_DURATION, time_s))
+
+    def start_auto_sweep(self):
+        """Run the full steady-state sweep automatically while keeping the live chart visible."""
+        self.auto_sweep_results = []
+        self.auto_sweep_index = 0
+        self._run_next_auto_step()
+
+    def _run_next_auto_step(self):
+        if self.auto_sweep_index >= len(self.auto_sweep_sequence):
+            self._finish_auto_sweep()
+            return
+
+        direction, percent = self.auto_sweep_sequence[self.auto_sweep_index]
+        requested_pwm = int(round((percent / 100.0) * 255))
+        self.radio_heat.setChecked(direction == 'HEAT')
+        self.radio_cool.setChecked(direction == 'COOL')
+        self.pwm_slider.setValue(requested_pwm)
+        self.send_command()
+
+        self.auto_sweep_step_start = time.monotonic()
+        self.auto_sweep_timer = QTimer(self)
+        self.auto_sweep_timer.setSingleShot(True)
+        self.auto_sweep_timer.timeout.connect(self._capture_auto_step_result)
+        self.auto_sweep_timer.start(int(AUTO_SWEEP_SECONDS * 1000))
+
+    def _capture_auto_step_result(self):
+        direction, percent = self.auto_sweep_sequence[self.auto_sweep_index]
+        requested_pwm = int(round((percent / 100.0) * 255))
+
+        temps = list(self.last_temps) if self.last_temps is not None else [math.nan] * NUM_SENSORS
+        avg_value = self.last_avg_c if self.last_avg_c is not None else math.nan
+        self.auto_sweep_results.append({
+            'direction': direction,
+            'requested_percent': percent,
+            'requested_pwm': requested_pwm,
+            'actual_pwm': self.cmd_pwm,
+            'steady_temp_c': avg_value,
+            'steady_temps': temps,
+            'time_s': time.monotonic() - self.auto_sweep_step_start if self.auto_sweep_step_start is not None else 0.0,
+        })
+
+        print(f"Auto-sweep step complete: {direction} @ {percent}% -> PWM {self.cmd_pwm}, avg temp {avg_value:.2f}C")
+        self.auto_sweep_index += 1
+        self._run_next_auto_step()
+
+    def _finish_auto_sweep(self):
+        if not self.auto_sweep_results:
+            return
+
+        with open(CSV_STEADY_FILENAME, 'w', newline='') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(['direction', 'requested_percent', 'requested_pwm', 'actual_pwm',
+                             'steady_temp_c', 'time_s'] + [f'steady_{name}' for name in SENSOR_NAMES])
+            for row in self.auto_sweep_results:
+                writer.writerow([
+                    row['direction'],
+                    row['requested_percent'],
+                    row['requested_pwm'],
+                    row['actual_pwm'],
+                    fmt(row['steady_temp_c']),
+                    row['time_s'],
+                ] + [fmt(t) for t in row['steady_temps']])
+
+        print(f"Saved automatic sweep results to {CSV_STEADY_FILENAME}")
+
+    def closeEvent(self, event):
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        if self.csv_file and not self.csv_file.closed:
+            self.csv_file.close()
+        event.accept()
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1].lower() == '--steady':
+        run_steady_state_scan()
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == '--summary':
+        summarize_existing_csv()
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == '--auto-sweep':
+        app = QApplication(sys.argv)
+        window = TECControlGUI(auto_run=True)
+        window.show()
+        sys.exit(app.exec())
+    else:
+        app = QApplication(sys.argv)
+        window = TECControlGUI()
+        window.show()
+        sys.exit(app.exec())
